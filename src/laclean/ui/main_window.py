@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -92,6 +94,7 @@ class MainWindow(QMainWindow):
         self._crop_node_id: UUID | None = None
         self._crop_before_state: PointCloudEditState | None = None
         self._crop_selection: RectangleSelection | None = None
+        self._scratch_project_directory: tempfile.TemporaryDirectory | None = None
         self.actions: dict[str, QAction] = {}
 
         self._create_actions()
@@ -385,15 +388,26 @@ class MainWindow(QMainWindow):
 
     def _save_document(self, project_path: str | Path | None) -> bool:
         try:
+            target_path = Path(project_path).expanduser().resolve() if project_path else None
+            if target_path is not None and target_path.suffix.lower() != ".lcp":
+                target_path = target_path.with_suffix(".lcp")
+            if target_path is not None:
+                self._copy_scratch_assets_to_project(target_path.parent)
+        except OSError as exc:
+            QMessageBox.critical(self, "保存项目失败", f"复制临时项目资产失败：{exc}")
+            return False
+
+        try:
             saved_path = self.project_service.save_project(
                 self.document,
                 ui_state=self._capture_ui_state(),
-                target_path=project_path,
+                target_path=target_path or project_path,
             )
         except ProjectError as exc:
             QMessageBox.critical(self, "保存项目失败", str(exc))
             return False
 
+        self._cleanup_scratch_project_directory()
         self._update_window_title()
         self._status_message.setText(f"项目已保存：{saved_path}")
         return True
@@ -408,10 +422,53 @@ class MainWindow(QMainWindow):
         self.viewer.clear_cad_models()
         self.point_clouds.clear()
         self.cad_models.clear()
+        self._cleanup_scratch_project_directory()
         self.document = document
         self.scene_tree.set_document(document)
         self._select_project_root()
         self._update_window_title()
+
+    def _asset_project_file_path(self) -> str:
+        if self.document.file_path is not None:
+            return self.document.file_path
+        return self._ensure_scratch_project_file_path()
+
+    def _ensure_scratch_project_file_path(self) -> str:
+        if self._scratch_project_directory is None:
+            self._scratch_project_directory = tempfile.TemporaryDirectory(
+                prefix="laclean-unsaved-"
+            )
+        scratch_root = Path(self._scratch_project_directory.name)
+        return str(scratch_root / "project.lcp")
+
+    def _copy_scratch_assets_to_project(self, project_directory: Path) -> None:
+        if self._scratch_project_directory is None:
+            return
+        scratch_assets = Path(self._scratch_project_directory.name) / "assets"
+        if not scratch_assets.exists():
+            return
+        target_assets = project_directory / "assets"
+        shutil.copytree(scratch_assets, target_assets, dirs_exist_ok=True)
+        for data in self.point_clouds.values():
+            if data.asset_path is not None:
+                candidate = Path(data.asset_path)
+                try:
+                    relative = candidate.resolve().relative_to(scratch_assets.parent.resolve())
+                except ValueError:
+                    continue
+                data.asset_path = project_directory / relative
+        for data in self.cad_models.values():
+            candidate = Path(data.asset_path)
+            try:
+                relative = candidate.resolve().relative_to(scratch_assets.parent.resolve())
+            except ValueError:
+                continue
+            data.asset_path = project_directory / relative
+
+    def _cleanup_scratch_project_directory(self) -> None:
+        if self._scratch_project_directory is not None:
+            self._scratch_project_directory.cleanup()
+            self._scratch_project_directory = None
 
     def _capture_ui_state(self) -> dict[str, str]:
         return {
@@ -598,13 +655,13 @@ class MainWindow(QMainWindow):
     def _apply_point_cloud_preview(self) -> None:
         dialog = self._processing_dialog
         preview = self._processing_preview
-        if dialog is None or preview is None or self.document.file_path is None:
+        if dialog is None or preview is None:
             return
         if self._point_cloud_task is not None and self._point_cloud_task.isRunning():
             return
 
         dialog.set_busy(True, "正在将处理结果写入项目资产…")
-        task = PointCloudPersistThread(preview.data, self.document.file_path, self)
+        task = PointCloudPersistThread(preview.data, self._asset_project_file_path(), self)
         task.succeeded.connect(self._on_point_cloud_result_persisted)
         task.failed.connect(self._on_point_cloud_processing_failed)
         task.finished.connect(self._finish_point_cloud_task)
@@ -711,9 +768,6 @@ class MainWindow(QMainWindow):
     def start_point_cloud_crop(self, node: SceneNode) -> bool:
         if node.kind is not NodeKind.POINT_CLOUD:
             return False
-        if self.document.file_path is None:
-            QMessageBox.warning(self, "矩形裁剪", "请先创建或保存项目。")
-            return False
         if self._point_cloud_task is not None and self._point_cloud_task.isRunning():
             QMessageBox.information(self, "点云任务", "已有点云任务正在执行，请稍候。")
             return False
@@ -819,7 +873,6 @@ class MainWindow(QMainWindow):
         if (
             node is None
             or selection is None
-            or self.document.file_path is None
             or (self._point_cloud_task is not None and self._point_cloud_task.isRunning())
         ):
             return
@@ -831,7 +884,7 @@ class MainWindow(QMainWindow):
             data,
             selection,
             keep_selected,
-            self.document.file_path,
+            self._asset_project_file_path(),
             self,
         )
         task.succeeded.connect(self._on_point_cloud_crop_applied)
@@ -972,30 +1025,24 @@ class MainWindow(QMainWindow):
         if self._point_cloud_task is not None and self._point_cloud_task.isRunning():
             QMessageBox.information(self, "后台任务", "已有导入或处理任务正在执行，请稍候。")
             return False
-        if self.document.file_path is None:
-            choice = QMessageBox.question(
-                self,
-                "需要保存项目",
-                "导入 STEP 前需要先保存项目，以便将模型复制到项目目录。现在保存吗？",
-                QMessageBox.Yes | QMessageBox.Cancel,
-                QMessageBox.Yes,
-            )
-            if choice != QMessageBox.Yes or not self.save_project_as():
-                return False
-
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_CAD_SUFFIXES))
         title = "导入机械臂 STEP" if node_kind is NodeKind.ROBOT else "导入 STEP 数模"
+        start_directory = (
+            str(Path(self.document.file_path).parent)
+            if self.document.file_path
+            else str(Path.cwd())
+        )
         source_path, _ = QFileDialog.getOpenFileName(
             self,
             title,
-            str(Path(self.document.file_path).parent),
+            start_directory,
             f"STEP 文件 ({suffixes});;所有文件 (*)",
         )
         if not source_path:
             return False
 
         task = CadModelImportThread(
-            source_path, self.document.file_path, node_kind, self
+            source_path, self._asset_project_file_path(), node_kind, self
         )
         task.succeeded.connect(self._on_cad_model_imported)
         task.failed.connect(self._on_cad_model_task_failed)
@@ -1052,28 +1099,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "点云任务", "已有点云任务正在执行，请稍候。")
             return False
 
-        if self.document.file_path is None:
-            choice = QMessageBox.question(
-                self,
-                "需要保存项目",
-                "导入点云前需要先保存项目，以便将源文件复制到项目目录。现在保存吗？",
-                QMessageBox.Yes | QMessageBox.Cancel,
-                QMessageBox.Yes,
-            )
-            if choice != QMessageBox.Yes or not self.save_project_as():
-                return False
-
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_POINT_CLOUD_SUFFIXES))
+        start_directory = (
+            str(Path(self.document.file_path).parent)
+            if self.document.file_path
+            else str(Path.cwd())
+        )
         source_path, _ = QFileDialog.getOpenFileName(
             self,
             "导入点云",
-            str(Path(self.document.file_path).parent),
+            start_directory,
             f"点云文件 ({suffixes});;所有文件 (*)",
         )
         if not source_path:
             return False
 
-        task = PointCloudImportThread(source_path, self.document.file_path, self)
+        task = PointCloudImportThread(source_path, self._asset_project_file_path(), self)
         task.succeeded.connect(self._on_point_cloud_imported)
         task.failed.connect(self._on_point_cloud_task_failed)
         task.finished.connect(self._finish_point_cloud_task)
@@ -1371,6 +1412,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API name
         if self._confirm_close_current_project():
+            self._cleanup_scratch_project_directory()
             event.accept()
         else:
             event.ignore()
