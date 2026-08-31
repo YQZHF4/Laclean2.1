@@ -1406,8 +1406,7 @@ class MainWindow(QMainWindow):
             self,
             "关于 Laclean Studio",
             "<b>Laclean Studio 0.1.0</b><br><br>"
-            "激光清洗机械臂离线编程平台<br>"
-            "PyQt5 · Open CASCADE · PCL",
+            "激光清洗机械臂离线编程平台",
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API name

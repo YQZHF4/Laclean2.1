@@ -283,10 +283,8 @@ class OccViewerPanel(QWidget):
         try:
             self._viewer.InitDriver()
             self._display = self._viewer._display
-            # pythonocc 7.9.x accepts two RGB lists; older releases also
-            # exposed a six-number overload, so keep this call version-specific.
-            self._display.set_bg_gradient_color([18, 22, 28], [42, 49, 59])
-            self._display.display_triedron()
+            self._configure_view_rendering()
+            self._display_view_triedron()
             self._display.View_Iso()
             self._display.Repaint()
             self._driver_initialized = True
@@ -314,6 +312,30 @@ class OccViewerPanel(QWidget):
         except Exception as exc:
             detail = log_exception("初始化 Open CASCADE 驱动", exc)
             self._set_unavailable(f"Open CASCADE 驱动初始化失败\n\n{detail}")
+
+    def _configure_view_rendering(self) -> None:
+        from OCC.Core.Aspect import Aspect_GFM_VER
+        from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
+
+        view = self._display.GetView()
+        dark = Quantity_Color(0.02, 0.02, 0.02, Quantity_TOC_RGB)
+        view.SetBgGradientColors(dark, dark, Aspect_GFM_VER)
+        params = view.ChangeRenderingParams()
+        params.NbMsaaSamples = 8
+        params.IsAntialiasingEnabled = True
+        view.Redraw()
+
+    def _display_view_triedron(self) -> None:
+        from OCC.Core.Aspect import Aspect_TOTP_LEFT_LOWER
+        from OCC.Core.Quantity import Quantity_Color, Quantity_NOC_BLACK
+        from OCC.Core.V3d import V3d_ZBUFFER
+
+        self._display.GetView().TriedronDisplay(
+            Aspect_TOTP_LEFT_LOWER,
+            Quantity_Color(Quantity_NOC_BLACK),
+            0.14,
+            V3d_ZBUFFER,
+        )
 
     def _set_unavailable(self, message: str) -> None:
         self._occ_error = message

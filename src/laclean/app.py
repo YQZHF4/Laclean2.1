@@ -38,5 +38,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = create_application(argv)
     window = MainWindow()
     install_exception_hook(lambda: window)
-    window.show()
+    window.showMaximized()
     return app.exec_()

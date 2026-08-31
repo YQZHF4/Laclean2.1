@@ -198,6 +198,19 @@ python -m pip install -e . --no-deps --no-build-isolation
 conda install -c conda-forge pytest
 ```
 
+如果需要打包为 Windows exe：
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller --clean main.spec
+```
+
+打包结果位于：
+
+```text
+dist/Laclean Studio/Laclean Studio.exe
+```
+
 ## 运行
 
 在项目根目录执行：
