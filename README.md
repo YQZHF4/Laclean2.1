@@ -138,7 +138,7 @@ python scripts\smoke_test_step.py "资料\【机械臂R6-093S】客户模型.stp
 - 显示代理使用零拷贝步进视图。矩形框选以 25 万点为一块执行 `float32` 投影，避免
   为完整点云同时生成多份齐次坐标和 NDC 数组。
 - `processed_*.ply` 和 `cropped_*.ply` 使用分块二进制 PLY 流式写入，避免写盘前
-  创建完整的 Open3D `float64` 副本。
+  创建额外的大体量浮点副本。
 - 大文件复制和结果写入前会检查磁盘剩余空间，并预留 64 MB 安全余量。
 - 撤销历史最多 20 步，同时具有 768 MB 内存预算；超过预算时优先释放较早的命令，
   始终尽量保留最新一次裁剪以供撤销。
@@ -178,18 +178,17 @@ python scripts\smoke_test_occ.py --points 1000000
 
 - `PyQt5>=5.15,<6`
 - `numpy>=2.2,<3`
-- `open3d>=0.19,<0.20`
+- `python-pcl`
 - `pythonocc-core=7.9.3=novtk*`
 
 测试依赖：
 
 - `pytest`
 
-OCC 推荐使用 conda-forge 的无 VTK 构建，避免与环境内现有的 Open3D/VTK 冲突：
+OCC 推荐使用 conda-forge 的无 VTK 构建，避免引入不需要的 VTK 依赖：
 
 ```powershell
-conda install -c conda-forge "pythonocc-core=7.9.3=novtk*" "numpy=2.2.6" "pyqt=5.15.*"
-python -m pip install "open3d>=0.19,<0.20"
+conda install -c conda-forge "pythonocc-core=7.9.3=novtk*" "numpy=2.2.6" "pyqt=5.15.*" "python-pcl"
 python -m pip install -e . --no-deps --no-build-isolation
 ```
 

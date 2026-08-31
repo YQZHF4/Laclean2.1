@@ -8,11 +8,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import open3d as o3d
 
 from laclean.core.error_handling import ensure_free_disk_space
 from laclean.core.point_cloud import PointCloudData
 from laclean.core.scene import NodeKind, SceneNode
+from laclean.services.point_cloud_io import PointCloudIOError, read_point_cloud_file
 
 
 SUPPORTED_POINT_CLOUD_SUFFIXES = {
@@ -113,47 +113,8 @@ class PointCloudService:
 
     def _read_point_cloud(self, path: Path, node_id, name: str) -> PointCloudData:
         try:
-            cloud = o3d.io.read_point_cloud(
-                str(path), remove_nan_points=False, remove_infinite_points=False
-            )
+            return read_point_cloud_file(path, node_id, name)
         except MemoryError:
             raise
-        except Exception as exc:
+        except PointCloudIOError as exc:
             raise PointCloudError(f"读取点云失败：{exc}") from exc
-
-        raw_points = np.asarray(cloud.points)
-        if raw_points.ndim != 2 or raw_points.shape[1:] != (3,) or len(raw_points) == 0:
-            raise PointCloudError(f"文件中没有可用的三维点：\n{path}")
-
-        finite_mask = np.isfinite(raw_points).all(axis=1)
-        points = np.ascontiguousarray(raw_points[finite_mask], dtype=np.float32)
-        if len(points) == 0:
-            raise PointCloudError(f"文件中的点全部为无效数值：\n{path}")
-
-        colors = None
-        if cloud.has_colors():
-            raw_colors = np.asarray(cloud.colors)
-            if len(raw_colors) == len(raw_points):
-                valid_colors = np.clip(raw_colors[finite_mask], 0.0, 1.0)
-                colors = np.ascontiguousarray(np.rint(valid_colors * 255.0), dtype=np.uint8)
-
-        normals = None
-        if cloud.has_normals():
-            raw_normals = np.asarray(cloud.normals)
-            if len(raw_normals) == len(raw_points):
-                normals = np.ascontiguousarray(raw_normals[finite_mask], dtype=np.float32)
-
-        result = PointCloudData(
-            node_id=node_id,
-            name=name,
-            asset_path=path,
-            points=points,
-            colors=colors,
-            normals=normals,
-            unit="mm",
-            invalid_points_removed=int(len(raw_points) - len(points)),
-        )
-        # Open3D owns float64 buffers. Release them before the worker publishes
-        # the compact float32/uint8 result to keep import peak memory short-lived.
-        del raw_points, cloud
-        return result

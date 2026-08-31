@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
-import open3d as o3d
 
+from laclean.core.point_cloud import PointCloudData
+from laclean.services.point_cloud_io import write_binary_ply
 from laclean.services.point_cloud_service import PointCloudService
 from laclean.services.project_service import ProjectService
 
@@ -50,17 +52,19 @@ def add_sample(project_path: Path) -> None:
         )
     )
 
-    cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(points)
-    cloud.colors = o3d.utility.Vector3dVector(np.clip(colors, 0.0, 1.0))
-    cloud.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=12.0, max_nn=30)
+    normals = np.tile(np.array([[0.0, 0.0, 1.0]], dtype=np.float32), (len(points), 1))
+    sample = PointCloudData(
+        node_id=uuid4(),
+        name=Path(SAMPLE_FILE_NAME).stem,
+        asset_path=None,
+        points=np.ascontiguousarray(points, dtype=np.float32),
+        colors=np.ascontiguousarray(np.rint(np.clip(colors, 0.0, 1.0) * 255.0), dtype=np.uint8),
+        normals=normals,
     )
 
     with tempfile.TemporaryDirectory() as temporary_directory:
         source_path = Path(temporary_directory) / SAMPLE_FILE_NAME
-        if not o3d.io.write_point_cloud(str(source_path), cloud, write_ascii=False):
-            raise RuntimeError("Failed to write sample PLY file.")
+        write_binary_ply(source_path, sample)
         imported = PointCloudService().import_to_project(source_path, project_path)
 
     point_group.add_child(imported.node)
