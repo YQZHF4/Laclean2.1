@@ -1,0 +1,5 @@
+https://github.com/qunat/Pythonocc-CAD
+
+建议跟祝秋一起搞
+要用solidworks先拆分
+然后再用正运动学计算位置才能正确显示

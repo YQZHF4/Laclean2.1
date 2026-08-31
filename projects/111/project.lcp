@@ -1,0 +1,108 @@
+{
+  "format": "laclean-project",
+  "schema_version": 1,
+  "application_version": "0.1.0",
+  "project": {
+    "name": "未命名项目",
+    "root": {
+      "id": "9f33a324-5c01-478b-84eb-8993971685d8",
+      "name": "未命名项目",
+      "kind": "project",
+      "visible": true,
+      "metadata": {},
+      "children": [
+        {
+          "id": "73d5a0cc-b7b6-433a-9c1a-f0e4cb7dd8fa",
+          "name": "点云",
+          "kind": "group",
+          "visible": true,
+          "metadata": {
+            "group": "point_clouds",
+            "accepted_formats": [
+              ".pcd",
+              ".ply",
+              ".xyz",
+              ".xyzn",
+              ".xyzrgb",
+              ".pts"
+            ]
+          },
+          "children": []
+        },
+        {
+          "id": "8dd6bae3-9c19-4084-a3e4-e04b8ce504d3",
+          "name": "数模",
+          "kind": "group",
+          "visible": true,
+          "metadata": {
+            "group": "cad_models",
+            "accepted_formats": [
+              ".step",
+              ".stp"
+            ]
+          },
+          "children": []
+        },
+        {
+          "id": "5a52ea78-1fb4-41ef-aa0c-770c9c4fb830",
+          "name": "机械臂",
+          "kind": "group",
+          "visible": true,
+          "metadata": {
+            "group": "robots",
+            "accepted_formats": [
+              ".step",
+              ".stp"
+            ]
+          },
+          "children": [
+            {
+              "id": "4443248b-a0b1-4288-b39c-2f93b57bd12c",
+              "name": "机械臂接口（预留）",
+              "kind": "robot",
+              "visible": false,
+              "metadata": {
+                "placeholder": true,
+                "vendor": "凌云光"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "9c9cbbc3-0026-4e37-a129-e231960f29e5",
+          "name": "工具与振镜",
+          "kind": "group",
+          "visible": true,
+          "metadata": {
+            "group": "tools"
+          },
+          "children": []
+        },
+        {
+          "id": "a65303d8-8e25-447e-a99c-8a2893c01a76",
+          "name": "坐标系",
+          "kind": "group",
+          "visible": true,
+          "metadata": {
+            "group": "frames"
+          },
+          "children": []
+        },
+        {
+          "id": "91f91d04-6d50-458e-a14e-a5d0212865f9",
+          "name": "路径",
+          "kind": "group",
+          "visible": true,
+          "metadata": {
+            "group": "paths"
+          },
+          "children": []
+        }
+      ]
+    }
+  },
+  "ui": {
+    "main_window_state": "AAAA/wAAAAD9AAAAAgAAAAAAAAEiAAAC6vwCAAAAAfsAAAASAHMAYwBlAG4AZQBEAG8AYwBrAQAAAHkAAALqAAAAbAD///8AAAABAAABaAAAAur8AgAAAAH7AAAAHABwAHIAbwBwAGUAcgB0AGkAZQBzAEQAbwBjAGsBAAAAeQAAAuoAAABkAP///wAAAzAAAALqAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAEAAAAWAG0AYQBpAG4AVABvAG8AbABiAGEAcgEAAAAA/////wAAAAAAAAAA"
+  }
+}

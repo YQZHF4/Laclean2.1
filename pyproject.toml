@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laclean-studio"
+version = "0.1.0"
+description = "Laser cleaning robot offline programming desktop application"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "PyQt5>=5.15,<6",
+    "numpy>=2.2,<3",
+    "open3d>=0.19,<0.20",
+]
+
+[project.scripts]
+laclean = "laclean.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
