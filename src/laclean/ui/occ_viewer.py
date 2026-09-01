@@ -14,7 +14,7 @@ from laclean.core.point_cloud import PointCloudData
 from laclean.core.cad_model import CadModelData
 from laclean.core.transforms import gp_trsf_to_matrix, matrix_to_gp_trsf
 
-from PyQt5.QtCore import QRect, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFrame,
@@ -167,6 +167,37 @@ class OccViewerPanel(QWidget):
                     inner_self.crop_start = None
                     inner_self.crop_current = None
 
+                def occ_mouse_pos(inner_self, event) -> QPoint:
+                    pos = event.pos()
+                    ratio_x, ratio_y = inner_self.occ_window_ratio()
+                    return QPoint(
+                        int(round(pos.x() * ratio_x)),
+                        int(round(pos.y() * ratio_y)),
+                    )
+
+                def occ_window_ratio(inner_self) -> tuple[float, float]:
+                    if getattr(inner_self, "_display", None) is None:
+                        return (1.0, 1.0)
+                    try:
+                        occ_width, occ_height = inner_self._display.GetView().Window().Size()
+                    except Exception:
+                        ratio = float(inner_self.devicePixelRatioF())
+                        return (ratio, ratio)
+                    widget_width = max(1, int(inner_self.width()))
+                    widget_height = max(1, int(inner_self.height()))
+                    return (
+                        float(occ_width) / float(widget_width),
+                        float(occ_height) / float(widget_height),
+                    )
+
+                def occ_rect_from_qt_rect(inner_self, rectangle: QRect) -> QRect:
+                    ratio_x, ratio_y = inner_self.occ_window_ratio()
+                    left = int(round(rectangle.left() * ratio_x))
+                    top = int(round(rectangle.top() * ratio_y))
+                    right = int(round(rectangle.right() * ratio_x))
+                    bottom = int(round(rectangle.bottom() * ratio_y))
+                    return QRect(QPoint(left, top), QPoint(right, bottom)).normalized()
+
                 def set_crop_mode(inner_self, enabled: bool) -> None:
                     inner_self.crop_mode = bool(enabled)
                     inner_self.crop_start = None
@@ -188,7 +219,21 @@ class OccViewerPanel(QWidget):
                             inner_self.crop_interaction_cancelled.emit()
                         event.accept()
                         return
-                    super(TransformAwareViewer, inner_self).mousePressEvent(event)
+                    inner_self.setFocus()
+                    pos = inner_self.occ_mouse_pos(event)
+                    inner_self.dragStartPosX = pos.x()
+                    inner_self.dragStartPosY = pos.y()
+                    if inner_self.manipulator.HasActiveMode():
+                        inner_self.manipulator.StartTransform(
+                            inner_self.dragStartPosX,
+                            inner_self.dragStartPosY,
+                            inner_self._display.GetView(),
+                        )
+                    else:
+                        inner_self._display.StartRotation(
+                            inner_self.dragStartPosX,
+                            inner_self.dragStartPosY,
+                        )
 
                 def mouseMoveEvent(inner_self, event) -> None:  # noqa: N802
                     if inner_self.crop_mode:
@@ -200,7 +245,44 @@ class OccViewerPanel(QWidget):
                             inner_self.update()
                         event.accept()
                         return
-                    super(TransformAwareViewer, inner_self).mouseMoveEvent(event)
+                    pos = inner_self.occ_mouse_pos(event)
+                    buttons = event.buttons()
+                    modifiers = event.modifiers()
+                    if buttons == Qt.LeftButton and modifiers != Qt.ShiftModifier:
+                        if inner_self.manipulator.HasActiveMode():
+                            inner_self.trsf = inner_self.manipulator.Transform(
+                                pos.x(), pos.y(), inner_self._display.GetView()
+                            )
+                            inner_self.manip_moved = True
+                            inner_self._display.View.Redraw()
+                        else:
+                            inner_self.cursor = "rotate"
+                            inner_self._display.Rotation(pos.x(), pos.y())
+                            inner_self._drawbox = False
+                    elif buttons == Qt.RightButton and modifiers != Qt.ShiftModifier:
+                        inner_self.cursor = "zoom"
+                        inner_self._display.Repaint()
+                        inner_self._display.DynamicZoom(
+                            abs(inner_self.dragStartPosX),
+                            abs(inner_self.dragStartPosY),
+                            abs(pos.x()),
+                            abs(pos.y()),
+                        )
+                        inner_self.dragStartPosX = pos.x()
+                        inner_self.dragStartPosY = pos.y()
+                        inner_self._drawbox = False
+                    elif buttons == Qt.MidButton:
+                        dx = pos.x() - inner_self.dragStartPosX
+                        dy = pos.y() - inner_self.dragStartPosY
+                        inner_self.dragStartPosX = pos.x()
+                        inner_self.dragStartPosY = pos.y()
+                        inner_self.cursor = "pan"
+                        inner_self._display.Pan(dx, -dy)
+                        inner_self._drawbox = False
+                    else:
+                        inner_self._drawbox = False
+                        inner_self._display.MoveTo(pos.x(), pos.y())
+                        inner_self.cursor = "arrow"
 
                 def mouseReleaseEvent(inner_self, event) -> None:  # noqa: N802
                     if inner_self.crop_mode:
@@ -210,12 +292,13 @@ class OccViewerPanel(QWidget):
                             ).normalized()
                             inner_self.set_crop_mode(False)
                             if rectangle.width() >= 4 and rectangle.height() >= 4:
+                                occ_rectangle = inner_self.occ_rect_from_qt_rect(rectangle)
                                 inner_self.crop_rectangle_completed.emit(
                                     (
-                                        rectangle.left(),
-                                        rectangle.top(),
-                                        rectangle.right(),
-                                        rectangle.bottom(),
+                                        occ_rectangle.left(),
+                                        occ_rectangle.top(),
+                                        occ_rectangle.right(),
+                                        occ_rectangle.bottom(),
                                     )
                                 )
                             else:
@@ -223,7 +306,21 @@ class OccViewerPanel(QWidget):
                         event.accept()
                         return
                     was_moved = inner_self.manip_moved
-                    super(TransformAwareViewer, inner_self).mouseReleaseEvent(event)
+                    pos = inner_self.occ_mouse_pos(event)
+                    modifiers = event.modifiers()
+                    if event.button() == Qt.LeftButton:
+                        if inner_self.manip_moved:
+                            inner_self.trsf_manip.append(inner_self.trsf)
+                            inner_self.manip_moved = False
+                        if modifiers == Qt.ShiftModifier:
+                            inner_self._display.ShiftSelect(pos.x(), pos.y())
+                        else:
+                            inner_self._display.Select(pos.x(), pos.y())
+                            if inner_self._display.selected_shapes is not None:
+                                inner_self.sig_topods_selected.emit(
+                                    inner_self._display.selected_shapes
+                                )
+                    inner_self.cursor = "arrow"
                     if was_moved:
                         inner_self.manipulator_released.emit()
 
@@ -398,10 +495,23 @@ class OccViewerPanel(QWidget):
         camera = self._display.GetView().Camera()
         orientation = self._occ_matrix_to_numpy(camera.OrientationMatrix())
         projection = self._occ_matrix_to_numpy(camera.ProjectionMatrix())
-        return projection @ orientation, (
-            max(1, int(self._viewer.width())),
-            max(1, int(self._viewer.height())),
-        )
+        return projection @ orientation, self._occ_viewport_size()
+
+    def _occ_viewport_size(self) -> tuple[int, int]:
+        if not self.is_ready:
+            return (
+                max(1, int(self._viewer.width() if self._viewer is not None else 1)),
+                max(1, int(self._viewer.height() if self._viewer is not None else 1)),
+            )
+        try:
+            width, height = self._display.GetView().Window().Size()
+            return max(1, int(width)), max(1, int(height))
+        except Exception:
+            ratio = float(self._viewer.devicePixelRatioF()) if self._viewer is not None else 1.0
+            return (
+                max(1, int(round(self._viewer.width() * ratio))),
+                max(1, int(round(self._viewer.height() * ratio))),
+            )
 
     @staticmethod
     def _occ_matrix_to_numpy(matrix: object) -> np.ndarray:
