@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Callable
 from uuid import UUID
 
@@ -15,12 +14,10 @@ from laclean.core.cad_model import CadModelData
 from laclean.core.transforms import gp_trsf_to_matrix, matrix_to_gp_trsf
 
 from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QComboBox,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -32,7 +29,6 @@ from PyQt5.QtWidgets import (
 class OccViewerPanel(QWidget):
     initialized = pyqtSignal(bool, str)
     manipulator_transform_changed = pyqtSignal(str, object)
-    manipulator_coordinate_mode_changed = pyqtSignal(str, str)
     crop_rectangle_drawn = pyqtSignal(object)
     crop_cancelled = pyqtSignal()
 
@@ -72,16 +68,6 @@ class OccViewerPanel(QWidget):
         header_layout.addWidget(title)
         header_layout.addStretch(1)
 
-        self._coordinate_mode_combo = QComboBox()
-        self._coordinate_mode_combo.addItem("局部", "local")
-        self._coordinate_mode_combo.addItem("世界", "world")
-        self._coordinate_mode_combo.setEnabled(False)
-        self._coordinate_mode_combo.setToolTip("切换操纵器轴的局部/世界坐标方向")
-        self._coordinate_mode_combo.currentIndexChanged.connect(
-            self._on_coordinate_mode_changed
-        )
-        header_layout.addWidget(self._coordinate_mode_combo)
-
         self._crop_badge = QLabel("矩形框选 · 穿透")
         self._crop_badge.setObjectName("cropModeBadge")
         self._crop_badge.hide()
@@ -111,7 +97,7 @@ class OccViewerPanel(QWidget):
         self._stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root_layout.addWidget(self._stack, 1)
 
-        self._placeholder = QLabel("正在准备 Open CASCADE 三维窗口…")
+        self._placeholder = QLabel("正在准备三维窗口…")
         self._placeholder.setObjectName("occUnavailable")
         self._placeholder.setAlignment(Qt.AlignCenter)
         self._placeholder.setWordWrap(True)
@@ -140,14 +126,15 @@ class OccViewerPanel(QWidget):
 
     def _create_occ_widget(self) -> None:
         if os.environ.get("LACLEAN_DISABLE_OCC") == "1":
-            self._set_unavailable("测试模式：OCC 原生窗口已禁用")
+            self._set_unavailable("测试模式：三维窗口已禁用")
             return
         try:
             from OCC.Display.backend import load_backend
 
             load_backend("pyqt5")
-            from OCC.Core.AIS import AIS_ManipulatorOwner
             from OCC.Display.qtDisplay import qtViewer3dWithManipulator
+            from OCC.Core.AIS import AIS_RubberBand
+            from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
 
             class TransformAwareViewer(qtViewer3dWithManipulator):
                 manipulator_released = pyqtSignal()
@@ -160,6 +147,7 @@ class OccViewerPanel(QWidget):
                     inner_self.crop_start = None
                     inner_self.crop_current = None
                     inner_self.manipulator_drag_active = False
+                    inner_self.crop_rubber_band = None
 
                 def occ_mouse_pos(inner_self, event) -> QPoint:
                     pos = event.pos()
@@ -187,21 +175,77 @@ class OccViewerPanel(QWidget):
                 def occ_rect_from_qt_rect(inner_self, rectangle: QRect) -> QRect:
                     ratio_x, ratio_y = inner_self.occ_window_ratio()
                     left = int(round(rectangle.left() * ratio_x))
-                    top = int(round(rectangle.top() * ratio_y))
                     right = int(round(rectangle.right() * ratio_x))
-                    bottom = int(round(rectangle.bottom() * ratio_y))
-                    return QRect(QPoint(left, top), QPoint(right, bottom)).normalized()
+                    qt_top = int(round(rectangle.top() * ratio_y))
+                    qt_bottom = int(round(rectangle.bottom() * ratio_y))
+                    occ_height = max(1, int(round(inner_self.height() * ratio_y)))
+                    bottom = occ_height - qt_bottom
+                    top = occ_height - qt_top
+                    return QRect(QPoint(left, bottom), QPoint(right, top)).normalized()
+
+                def screen_rect_from_qt_rect(inner_self, rectangle: QRect) -> QRect:
+                    ratio_x, ratio_y = inner_self.occ_window_ratio()
+                    return QRect(
+                        QPoint(
+                            int(round(rectangle.left() * ratio_x)),
+                            int(round(rectangle.top() * ratio_y)),
+                        ),
+                        QPoint(
+                            int(round(rectangle.right() * ratio_x)),
+                            int(round(rectangle.bottom() * ratio_y)),
+                        ),
+                    ).normalized()
 
                 def set_crop_mode(inner_self, enabled: bool) -> None:
                     inner_self.crop_mode = bool(enabled)
                     inner_self.crop_start = None
                     inner_self.crop_current = None
+                    context = inner_self._display.Context
                     if enabled:
                         inner_self.setCursor(Qt.CrossCursor)
                         inner_self.setFocus()
                     else:
                         inner_self.unsetCursor()
+                        if inner_self.crop_rubber_band is not None:
+                            context.Remove(inner_self.crop_rubber_band, False)
+                            inner_self.crop_rubber_band = None
+                            context.UpdateCurrentViewer()
                     inner_self.update()
+
+                def update_crop_rubber_band(inner_self) -> None:
+                    if (
+                        inner_self.crop_start is None
+                        or inner_self.crop_current is None
+                    ):
+                        return
+                    rectangle = inner_self.occ_rect_from_qt_rect(
+                        QRect(inner_self.crop_start, inner_self.crop_current).normalized()
+                    )
+                    is_new = inner_self.crop_rubber_band is None
+                    if is_new:
+                        rubber_band = AIS_RubberBand()
+                        rubber_band.SetLineColor(
+                            Quantity_Color(0.24, 0.75, 1.0, Quantity_TOC_RGB)
+                        )
+                        rubber_band.SetLineWidth(2.0)
+                        rubber_band.SetFilling(True)
+                        rubber_band.SetFillColor(
+                            Quantity_Color(0.10, 0.56, 0.80, Quantity_TOC_RGB)
+                        )
+                        rubber_band.SetFillTransparency(0.82)
+                        inner_self.crop_rubber_band = rubber_band
+                    inner_self.crop_rubber_band.SetRectangle(
+                        rectangle.left(),
+                        rectangle.top(),
+                        rectangle.right(),
+                        rectangle.bottom(),
+                    )
+                    context = inner_self._display.Context
+                    if is_new:
+                        context.Display(inner_self.crop_rubber_band, False)
+                    else:
+                        context.Redisplay(inner_self.crop_rubber_band, False)
+                    context.UpdateCurrentViewer()
 
                 def manipulator_hit_at(inner_self, pos: QPoint) -> bool:
                     inner_self._display.MoveTo(pos.x(), pos.y())
@@ -210,12 +254,15 @@ class OccViewerPanel(QWidget):
                         if not context.HasDetected():
                             inner_self.manipulator.DeactivateCurrentMode()
                             return False
-                        owner = context.DetectedOwner()
-                        manipulator_owner = AIS_ManipulatorOwner.DownCast(owner)
-                        if manipulator_owner is None or (
-                            hasattr(manipulator_owner, "IsNull")
-                            and manipulator_owner.IsNull()
-                        ):
+                        detected = context.DetectedInteractive()
+                        if detected is None:
+                            inner_self.manipulator.DeactivateCurrentMode()
+                            return False
+                        try:
+                            is_manipulator = detected.IsSame(inner_self.manipulator)
+                        except AttributeError:
+                            is_manipulator = detected == inner_self.manipulator
+                        if not is_manipulator:
                             inner_self.manipulator.DeactivateCurrentMode()
                             return False
                         return inner_self.manipulator.HasActiveMode()
@@ -228,6 +275,7 @@ class OccViewerPanel(QWidget):
                         if event.button() == Qt.LeftButton:
                             inner_self.crop_start = event.pos()
                             inner_self.crop_current = event.pos()
+                            inner_self.update_crop_rubber_band()
                         elif event.button() == Qt.RightButton:
                             inner_self.set_crop_mode(False)
                             inner_self.crop_interaction_cancelled.emit()
@@ -248,7 +296,7 @@ class OccViewerPanel(QWidget):
                             inner_self._display.GetView(),
                         )
                         inner_self.manipulator_drag_active = True
-                    else:
+                    elif event.button() == Qt.LeftButton:
                         inner_self._display.StartRotation(
                             inner_self.dragStartPosX,
                             inner_self.dragStartPosY,
@@ -261,7 +309,7 @@ class OccViewerPanel(QWidget):
                             and event.buttons() & Qt.LeftButton
                         ):
                             inner_self.crop_current = event.pos()
-                            inner_self.update()
+                            inner_self.update_crop_rubber_band()
                         event.accept()
                         return
                     pos = inner_self.occ_mouse_pos(event)
@@ -278,18 +326,14 @@ class OccViewerPanel(QWidget):
                             inner_self.cursor = "rotate"
                             inner_self._display.Rotation(pos.x(), pos.y())
                             inner_self._drawbox = False
-                    elif buttons == Qt.RightButton and modifiers != Qt.ShiftModifier:
-                        inner_self.cursor = "zoom"
-                        inner_self._display.Repaint()
-                        inner_self._display.DynamicZoom(
-                            abs(inner_self.dragStartPosX),
-                            abs(inner_self.dragStartPosY),
-                            abs(pos.x()),
-                            abs(pos.y()),
-                        )
+                    elif buttons == Qt.RightButton:
+                        dx = pos.x() - inner_self.dragStartPosX
+                        dy = pos.y() - inner_self.dragStartPosY
                         inner_self.dragStartPosX = pos.x()
                         inner_self.dragStartPosY = pos.y()
                         inner_self._drawbox = False
+                        inner_self.cursor = "pan"
+                        inner_self._display.Pan(dx, -dy)
                     elif buttons == Qt.MidButton:
                         dx = pos.x() - inner_self.dragStartPosX
                         dy = pos.y() - inner_self.dragStartPosY
@@ -311,13 +355,15 @@ class OccViewerPanel(QWidget):
                             ).normalized()
                             inner_self.set_crop_mode(False)
                             if rectangle.width() >= 4 and rectangle.height() >= 4:
-                                occ_rectangle = inner_self.occ_rect_from_qt_rect(rectangle)
+                                screen_rectangle = inner_self.screen_rect_from_qt_rect(
+                                    rectangle
+                                )
                                 inner_self.crop_rectangle_completed.emit(
                                     (
-                                        occ_rectangle.left(),
-                                        occ_rectangle.top(),
-                                        occ_rectangle.right(),
-                                        occ_rectangle.bottom(),
+                                        screen_rectangle.left(),
+                                        screen_rectangle.top(),
+                                        screen_rectangle.right(),
+                                        screen_rectangle.bottom(),
                                     )
                                 )
                             else:
@@ -352,22 +398,6 @@ class OccViewerPanel(QWidget):
                         return
                     super(TransformAwareViewer, inner_self).keyPressEvent(event)
 
-                def paintEvent(inner_self, event) -> None:  # noqa: N802
-                    super(TransformAwareViewer, inner_self).paintEvent(event)
-                    if (
-                        not inner_self.crop_mode
-                        or inner_self.crop_start is None
-                        or inner_self.crop_current is None
-                    ):
-                        return
-                    rectangle = QRect(
-                        inner_self.crop_start, inner_self.crop_current
-                    ).normalized()
-                    painter = QPainter(inner_self)
-                    painter.setPen(QPen(QColor(62, 190, 255), 2, Qt.DashLine))
-                    painter.setBrush(QBrush(QColor(24, 142, 205, 45)))
-                    painter.drawRect(rectangle)
-
             self._viewer = TransformAwareViewer(self)
             self._viewer.manipulator_released.connect(self._on_manipulator_released)
             self._viewer.crop_rectangle_completed.connect(
@@ -380,16 +410,14 @@ class OccViewerPanel(QWidget):
             self._stack.addWidget(self._viewer)
             self._stack.setCurrentWidget(self._viewer)
         except Exception as exc:  # Native packages need a graceful diagnostic.
-            log_exception("初始化 OCC Qt 控件", exc)
+            log_exception("初始化三维窗口", exc)
             details = f"{type(exc).__name__}: {exc}"
             if isinstance(exc, ModuleNotFoundError) and exc.name == "OCC":
                 details = (
-                    "当前 Python 环境没有安装 pythonocc-core。\n\n"
-                    f"当前解释器：\n{sys.executable}\n\n"
-                    "请双击 run_laclean.bat，或执行：\n"
-                    "conda run -n Laser python main.py"
+                    "当前运行环境缺少三维显示组件。\n\n"
+                    "请检查项目依赖是否已正确安装。"
                 )
-            self._set_unavailable(f"Open CASCADE 查看器不可用\n\n{details}")
+            self._set_unavailable(f"三维查看器不可用\n\n{details}")
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt API name
         super().showEvent(event)
@@ -425,10 +453,10 @@ class OccViewerPanel(QWidget):
                 )
             if pending_cad:
                 self.fit_all()
-            self.initialized.emit(True, "OCC 7.9.3 三维视图已就绪")
+            self.initialized.emit(True, "三维视图已就绪")
         except Exception as exc:
-            detail = log_exception("初始化 Open CASCADE 驱动", exc)
-            self._set_unavailable(f"Open CASCADE 驱动初始化失败\n\n{detail}")
+            detail = log_exception("初始化三维驱动", exc)
+            self._set_unavailable(f"三维驱动初始化失败\n\n{detail}")
 
     def _configure_view_rendering(self) -> None:
         from OCC.Core.Aspect import Aspect_GFM_VER
@@ -536,7 +564,7 @@ class OccViewerPanel(QWidget):
 
     def capture_projection_state(self) -> tuple[object, tuple[int, int]]:
         if not self.is_ready or self._viewer is None:
-            raise RuntimeError("OCC 三维视图尚未就绪。")
+            raise RuntimeError("三维视图尚未就绪。")
         camera = self._display.GetView().Camera()
         orientation = self._occ_matrix_to_numpy(camera.OrientationMatrix())
         projection = self._occ_matrix_to_numpy(camera.ProjectionMatrix())
@@ -770,7 +798,6 @@ class OccViewerPanel(QWidget):
         key = str(node_id)
         current = self._point_cloud_objects.get(key)
         if not self.is_ready or current is None:
-            self._coordinate_mode_combo.setEnabled(False)
             return False
 
         from OCC.Core.AIS import (
@@ -795,7 +822,6 @@ class OccViewerPanel(QWidget):
         self._manipulator = manipulator
         self._active_manipulator_key = key
         self._manipulator_target_key = key
-        self._coordinate_mode_combo.setEnabled(True)
         self._update_manipulator_position()
         self._display.Context.UpdateCurrentViewer()
         return True
@@ -814,32 +840,11 @@ class OccViewerPanel(QWidget):
             from OCC.Core.AIS import AIS_Manipulator
 
             self._viewer.set_manipulator(AIS_Manipulator())
-        has_target = (
-            not clear_target
-            and self._manipulator_target_key is not None
-            and self._manipulator_target_key in self._point_cloud_objects
-        )
-        self._coordinate_mode_combo.setEnabled(has_target)
-
     def set_manipulator_coordinate_mode(self, mode: str) -> None:
-        if mode not in {"local", "world"}:
-            raise ValueError(f"Unknown manipulator coordinate mode: {mode}")
-        self._manipulator_coordinate_mode = mode
-        index = self._coordinate_mode_combo.findData(mode)
-        if index >= 0 and index != self._coordinate_mode_combo.currentIndex():
-            self._coordinate_mode_combo.blockSignals(True)
-            self._coordinate_mode_combo.setCurrentIndex(index)
-            self._coordinate_mode_combo.blockSignals(False)
+        if mode != "local":
+            raise ValueError("操纵器仅支持点云局部坐标")
+        self._manipulator_coordinate_mode = "local"
         self._update_manipulator_position()
-
-    def _on_coordinate_mode_changed(self) -> None:
-        mode = self._coordinate_mode_combo.currentData()
-        if isinstance(mode, str):
-            self.set_manipulator_coordinate_mode(mode)
-            if self._manipulator_target_key is not None:
-                self.manipulator_coordinate_mode_changed.emit(
-                    self._manipulator_target_key, mode
-                )
 
     def _on_manipulator_released(self) -> None:
         key = self._active_manipulator_key

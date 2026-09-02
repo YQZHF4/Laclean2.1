@@ -112,7 +112,7 @@ class PropertiesPanel(QWidget):
         point_cloud_layout.addRow("坐标范围", self._cloud_bounds)
         point_cloud_layout.addRow("移除无效点", self._cloud_invalid)
         point_cloud_layout.addRow("内存占用", self._cloud_memory)
-        point_cloud_layout.addRow("位置 XYZ", self._cloud_translation)
+        point_cloud_layout.addRow("世界坐标位置 XYZ", self._cloud_translation)
         point_cloud_layout.addRow("旋转 Rx/Ry/Rz", self._cloud_rotation)
         point_cloud_layout.addRow("操纵器坐标", self._cloud_coordinate_mode)
         point_cloud_layout.addRow("处理状态", self._cloud_processing_state)
@@ -218,8 +218,7 @@ class PropertiesPanel(QWidget):
         except (TypeError, ValueError):
             self._cloud_translation.setText("—")
             self._cloud_rotation.setText("—")
-        mode = metadata.get("coordinate_mode", "local")
-        self._cloud_coordinate_mode.setText("局部" if mode == "local" else "世界")
+        self._cloud_coordinate_mode.setText("点云自身")
         history = metadata.get("processing_history", [])
         if isinstance(history, list) and history:
             self._cloud_processing_state.setText(f"已应用 {len(history)} 次")
@@ -306,7 +305,7 @@ class PropertiesPanel(QWidget):
         if node.kind is NodeKind.ROBOT:
             return "机械臂 STEP 已加载；正逆解和碰撞检测接口仍为预留。"
         if node.kind is NodeKind.CAD_MODEL:
-            return "STEP 数模已加载到 OCC 三维场景。"
+            return "STEP 数模已加载到三维场景。"
         if node.kind is NodeKind.POINT_CLOUD:
             return "右键点云可进入位置设置、基础处理和矩形裁剪。"
         if node.kind is NodeKind.PROJECT:

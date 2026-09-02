@@ -126,7 +126,6 @@ class MainWindow(QMainWindow):
             "galvo_connection": ("振镜通讯", QStyle.SP_DriveNetIcon, ""),
             "undo": ("撤销", QStyle.SP_ArrowBack, "Ctrl+Z"),
             "redo": ("重做", QStyle.SP_ArrowForward, "Ctrl+Y"),
-            "fit_all": ("适应窗口", QStyle.SP_TitleBarMaxButton, "F"),
             "about": ("关于", QStyle.SP_MessageBoxInformation, ""),
             "exit": ("退出", QStyle.SP_DialogCloseButton, "Alt+F4"),
         }
@@ -186,7 +185,6 @@ class MainWindow(QMainWindow):
 
         self._update_edit_actions()
 
-        self.actions["fit_all"].triggered.connect(self._fit_all)
         self.actions["about"].triggered.connect(self._show_about)
         self.actions["exit"].triggered.connect(self.close)
 
@@ -209,7 +207,6 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.actions["redo"])
 
         view_menu = self.menuBar().addMenu("视图(&V)")
-        view_menu.addAction(self.actions["fit_all"])
 
         tools_menu = self.menuBar().addMenu("工具(&T)")
         tools_menu.addAction(self.actions["camera_connection"])
@@ -290,11 +287,8 @@ class MainWindow(QMainWindow):
         self._robot_badge.setProperty("badge", "offline")
         self._galvo_badge = QLabel("振镜 未连接")
         self._galvo_badge.setProperty("badge", "offline")
-        self._coordinate_label = QLabel("X  —    Y  —    Z  —")
-        self._coordinate_label.setMinimumWidth(190)
 
         for widget in (
-            self._coordinate_label,
             self._camera_badge,
             self._robot_badge,
             self._galvo_badge,
@@ -307,9 +301,6 @@ class MainWindow(QMainWindow):
         self.viewer.initialized.connect(self._on_viewer_initialized)
         self.viewer.manipulator_transform_changed.connect(
             self._on_manipulator_transform_changed
-        )
-        self.viewer.manipulator_coordinate_mode_changed.connect(
-            self._on_manipulator_coordinate_mode_changed
         )
         self.viewer.crop_rectangle_drawn.connect(self._on_crop_rectangle_drawn)
         self.viewer.crop_cancelled.connect(self._on_crop_cancelled)
@@ -516,7 +507,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_viewer_initialized(self, success: bool, message: str) -> None:
-        self._status_message.setText(message if success else "OCC 查看器未就绪")
+        self._status_message.setText(message if success else "三维视图未就绪")
 
     def _on_node_selected(self, node: SceneNode | None) -> None:
         self._selected_node = node
@@ -782,7 +773,7 @@ class MainWindow(QMainWindow):
         self._crop_selection = None
         if not self.viewer.start_rectangle_crop():
             self._finish_crop_session(reattach=False)
-            QMessageBox.warning(self, "矩形裁剪", "OCC 三维视图尚未就绪。")
+            QMessageBox.warning(self, "矩形裁剪", "三维视图尚未就绪。")
             return False
         self._status_message.setText(
             "矩形框选：按住左键拖动；默认穿透选择；右键或 Esc 取消"
@@ -1062,7 +1053,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "STEP 显示失败",
-                f"模型已复制并加入项目，但 OCC 显示失败：\n{detail}",
+                f"模型已复制并加入项目，但三维显示失败：\n{detail}",
             )
 
         self.document.modified = True
@@ -1128,7 +1119,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "点云显示失败",
-                f"点云已复制并加入项目，但 OCC 显示失败：\n{detail}",
+                f"点云已复制并加入项目，但三维显示失败：\n{detail}",
             )
 
         self.document.modified = True
@@ -1336,22 +1327,6 @@ class MainWindow(QMainWindow):
             f"X {translation[0]:.2f}  Y {translation[1]:.2f}  Z {translation[2]:.2f} mm · "
             "旋转 "
             f"Rx {rotation[0]:.2f}°  Ry {rotation[1]:.2f}°  Rz {rotation[2]:.2f}°"
-        )
-
-    def _on_manipulator_coordinate_mode_changed(self, node_id: str, mode: str) -> None:
-        try:
-            node = self.document.find(UUID(node_id))
-        except ValueError:
-            return
-        if node is None or node.kind is not NodeKind.POINT_CLOUD:
-            return
-        node.metadata["coordinate_mode"] = mode
-        self.document.modified = True
-        self._update_window_title()
-        if self._selected_node is node:
-            self.properties.set_node(node)
-        self._status_message.setText(
-            f"{node.name}：操纵器已切换为{'局部' if mode == 'local' else '世界'}坐标"
         )
 
     def _reserved_action(self, action_id: str) -> None:

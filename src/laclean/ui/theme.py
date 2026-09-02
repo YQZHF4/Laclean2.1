@@ -7,6 +7,8 @@ QWidget {
     font-family: "Microsoft YaHei UI";
 }
 
+QLabel { background-color: transparent; }
+
 QMainWindow, QDialog { background-color: #171a1f; }
 
 QMenuBar {

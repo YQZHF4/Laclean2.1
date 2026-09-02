@@ -111,13 +111,13 @@ class CadModelService:
             from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_SOLID
             from OCC.Core.TopExp import TopExp_Explorer
         except ImportError as exc:
-            raise CadModelError("当前环境缺少 pythonocc-core，无法读取 STEP。") from exc
+            raise CadModelError("当前环境缺少三维显示组件，无法读取 STEP。") from exc
 
         try:
             reader = STEPControl_Reader()
             status = reader.ReadFile(str(path))
             if status != IFSelect_RetDone:
-                raise CadModelError(f"STEP 文件读取失败，OCCT 状态码：{int(status)}")
+                raise CadModelError(f"STEP 文件读取失败，状态码：{int(status)}")
             root_count = int(reader.NbRootsForTransfer())
             transferred = int(reader.TransferRoots())
             shape = reader.OneShape()
