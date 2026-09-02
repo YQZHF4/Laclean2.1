@@ -8,7 +8,7 @@ from laclean.services.project_service import ProjectService
 
 
 ROBOT_STEP = (
-    Path(__file__).resolve().parents[1] / "资料" / "【机械臂R6-093S】客户模型.stp"
+    Path(__file__).resolve().parents[1] / "模型" / "【机械臂R6-093S】客户模型.stp"
 )
 
 

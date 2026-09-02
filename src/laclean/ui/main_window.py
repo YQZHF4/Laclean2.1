@@ -558,9 +558,9 @@ class MainWindow(QMainWindow):
         if action_id == "import_robot":
             self.import_cad_model(NodeKind.ROBOT)
             return
-        if action_id == "set_point_cloud_pose" and node is not None:
+        if action_id in {"set_point_cloud_pose", "set_cad_model_pose"} and node is not None:
             self.scene_tree.select_node(node.node_id)
-            self.viewer.attach_point_cloud_manipulator(node.node_id)
+            self.viewer.attach_model_manipulator(node.node_id)
             self._status_message.setText("拖动三轴箭头平移，拖动圆环旋转")
             return
         if action_id == "process_point_cloud" and node is not None:
@@ -1047,6 +1047,7 @@ class MainWindow(QMainWindow):
                 result.data,
                 visible=result.node.visible,
                 color=self._cad_display_color(result.node),
+                transform=result.node.metadata.get("transform"),
             )
         except Exception as exc:
             detail = log_exception("显示 STEP", exc)
@@ -1205,6 +1206,7 @@ class MainWindow(QMainWindow):
                     data,
                     visible=node.visible,
                     color=self._cad_display_color(node),
+                    transform=node.metadata.get("transform"),
                     fit=False,
                 )
             except Exception as exc:
@@ -1310,10 +1312,11 @@ class MainWindow(QMainWindow):
             node = self.document.find(UUID(node_id))
         except ValueError:
             return
-        if node is None or node.kind is not NodeKind.POINT_CLOUD:
+        if node is None or node.kind not in {NodeKind.POINT_CLOUD, NodeKind.CAD_MODEL}:
             return
         node.metadata["transform"] = matrix
-        node.metadata["coordinate_mode"] = self.viewer.manipulator_coordinate_mode
+        if node.kind is NodeKind.POINT_CLOUD:
+            node.metadata["coordinate_mode"] = self.viewer.manipulator_coordinate_mode
         self.document.modified = True
         self._update_window_title()
         if self._selected_node is node:
@@ -1342,6 +1345,7 @@ class MainWindow(QMainWindow):
             "undo": "撤销",
             "redo": "重做",
             "set_point_cloud_pose": "设置点云位置",
+            "set_cad_model_pose": "设置数模位置",
             "process_point_cloud": "基本点云处理",
             "crop_point_cloud": "手动矩形裁剪",
             "forward_kinematics": "正运动学",

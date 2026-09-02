@@ -140,6 +140,8 @@ class PropertiesPanel(QWidget):
         self._cad_faces = QLabel("—")
         self._cad_size = QLabel("—")
         self._cad_bounds = QLabel("—")
+        self._cad_translation = QLabel("—")
+        self._cad_rotation = QLabel("—")
         self._cad_bounds.setWordWrap(True)
         cad_layout.addRow("源文件", self._cad_source)
         cad_layout.addRow("项目资产", self._cad_asset)
@@ -150,6 +152,8 @@ class PropertiesPanel(QWidget):
         cad_layout.addRow("面数", self._cad_faces)
         cad_layout.addRow("包围盒尺寸", self._cad_size)
         cad_layout.addRow("坐标范围", self._cad_bounds)
+        cad_layout.addRow("世界坐标位置 XYZ", self._cad_translation)
+        cad_layout.addRow("旋转 Rx/Ry/Rz", self._cad_rotation)
         self._cad_card.hide()
         self._content_layout.addWidget(self._cad_card)
 
@@ -287,6 +291,17 @@ class PropertiesPanel(QWidget):
         else:
             self._cad_size.setText("—")
             self._cad_bounds.setText("—")
+        try:
+            translation, rotation = pose_from_matrix(metadata.get("transform"))
+            self._cad_translation.setText(
+                ", ".join(f"{value:.3f}" for value in translation) + " mm"
+            )
+            self._cad_rotation.setText(
+                ", ".join(f"{value:.3f}°" for value in rotation)
+            )
+        except (TypeError, ValueError):
+            self._cad_translation.setText("—")
+            self._cad_rotation.setText("—")
         self._cad_card.show()
 
     @staticmethod

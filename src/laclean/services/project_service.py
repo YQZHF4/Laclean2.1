@@ -203,6 +203,9 @@ class ProjectService:
             if node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT} and not node.metadata.get(
                 "placeholder"
             ):
+                transform = node.metadata.get("transform")
+                if transform is not None and not self._is_matrix4(transform):
+                    raise InvalidProjectError(f"{location}.transform 必须是 4×4 数字矩阵。")
                 for key in ("file_size", "root_count", "solid_count", "face_count"):
                     value = node.metadata.get(key)
                     if value is not None and (

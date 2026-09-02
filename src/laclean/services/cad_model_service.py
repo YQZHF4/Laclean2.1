@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import numpy as np
+
 from laclean.core.cad_model import CadModelData
 from laclean.core.error_handling import ensure_free_disk_space
 from laclean.core.scene import NodeKind, SceneNode
@@ -77,6 +79,7 @@ class CadModelService:
                 "bounds_min": list(data.bounds_min),
                 "bounds_max": list(data.bounds_max),
                 "display_color": [0.72, 0.76, 0.82],
+                "transform": np.eye(4, dtype=float).tolist(),
             },
         )
         data.asset_path = asset_file

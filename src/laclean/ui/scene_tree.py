@@ -161,6 +161,8 @@ class SceneTreeWidget(QTreeWidget):
             menu.addSeparator()
             self._add_action(menu, "基本点云处理", "process_point_cloud", node)
             self._add_action(menu, "手动矩形裁剪", "crop_point_cloud", node)
+        elif node.kind is NodeKind.CAD_MODEL:
+            self._add_action(menu, "设置数模位置", "set_cad_model_pose", node)
         elif node.kind is NodeKind.ROBOT:
             self._add_action(menu, "正运动学", "forward_kinematics", node)
             self._add_action(menu, "逆运动学", "inverse_kinematics", node)

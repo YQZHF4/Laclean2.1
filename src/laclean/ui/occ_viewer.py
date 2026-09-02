@@ -44,8 +44,9 @@ class OccViewerPanel(QWidget):
         ] = {}
         self._point_cloud_bounds: dict[str, tuple[object, object]] = {}
         self._cad_objects: dict[str, object] = {}
+        self._cad_model_bounds: dict[str, tuple[object, object]] = {}
         self._pending_cad_models: dict[
-            str, tuple[CadModelData, bool, tuple[float, float, float]]
+            str, tuple[CadModelData, bool, tuple[float, float, float], object]
         ] = {}
         self._manipulator = None
         self._active_manipulator_key: str | None = None
@@ -323,7 +324,7 @@ class OccViewerPanel(QWidget):
                             inner_self.manip_moved = True
                             inner_self._display.View.Redraw()
                         else:
-                            inner_self.cursor = "rotate"
+                            inner_self.unsetCursor()
                             inner_self._display.Rotation(pos.x(), pos.y())
                             inner_self._drawbox = False
                     elif buttons == Qt.RightButton:
@@ -332,20 +333,20 @@ class OccViewerPanel(QWidget):
                         inner_self.dragStartPosX = pos.x()
                         inner_self.dragStartPosY = pos.y()
                         inner_self._drawbox = False
-                        inner_self.cursor = "pan"
+                        inner_self.unsetCursor()
                         inner_self._display.Pan(dx, -dy)
                     elif buttons == Qt.MidButton:
                         dx = pos.x() - inner_self.dragStartPosX
                         dy = pos.y() - inner_self.dragStartPosY
                         inner_self.dragStartPosX = pos.x()
                         inner_self.dragStartPosY = pos.y()
-                        inner_self.cursor = "pan"
+                        inner_self.unsetCursor()
                         inner_self._display.Pan(dx, -dy)
                         inner_self._drawbox = False
                     else:
                         inner_self._drawbox = False
                         inner_self._display.MoveTo(pos.x(), pos.y())
-                        inner_self.cursor = "arrow"
+                        inner_self.unsetCursor()
 
                 def mouseReleaseEvent(inner_self, event) -> None:  # noqa: N802
                     if inner_self.crop_mode:
@@ -386,7 +387,7 @@ class OccViewerPanel(QWidget):
                                     inner_self._display.selected_shapes
                                 )
                         inner_self.manipulator_drag_active = False
-                    inner_self.cursor = "arrow"
+                    inner_self.unsetCursor()
                     if was_moved:
                         inner_self.manipulator_released.emit()
 
@@ -447,9 +448,9 @@ class OccViewerPanel(QWidget):
                 self.fit_all()
             pending_cad = list(self._pending_cad_models.values())
             self._pending_cad_models.clear()
-            for data, visible, color in pending_cad:
+            for data, visible, color, transform in pending_cad:
                 self.display_cad_model(
-                    data, visible=visible, color=color, fit=False
+                    data, visible=visible, color=color, transform=transform, fit=False
                 )
             if pending_cad:
                 self.fit_all()
@@ -673,14 +674,16 @@ class OccViewerPanel(QWidget):
         *,
         visible: bool = True,
         color: tuple[float, float, float] = (0.72, 0.76, 0.82),
+        transform: object | None = None,
         fit: bool = True,
     ) -> None:
         """Create or replace a shaded AIS presentation for a STEP shape."""
 
         key = str(data.node_id)
         color_value = tuple(float(max(0.0, min(1.0, value))) for value in color)
+        transform_value = transform if transform is not None else np.eye(4)
         if not self.is_ready:
-            self._pending_cad_models[key] = (data, visible, color_value)
+            self._pending_cad_models[key] = (data, visible, color_value, transform_value)
             return
 
         from OCC.Core.AIS import AIS_Shape
@@ -691,11 +694,13 @@ class OccViewerPanel(QWidget):
         presentation.SetColor(
             Quantity_Color(*color_value, Quantity_TOC_RGB)
         )
+        presentation.SetLocalTransformation(matrix_to_gp_trsf(transform_value))
         presentation.SetDisplayMode(1)
         self._display.Context.Display(presentation, False)
         if not visible:
             self._display.Context.Erase(presentation, False)
         self._cad_objects[key] = presentation
+        self._cad_model_bounds[key] = (data.bounds_min, data.bounds_max)
         self._display.Context.UpdateCurrentViewer()
         if fit and visible:
             self.fit_all()
@@ -704,8 +709,8 @@ class OccViewerPanel(QWidget):
         key = str(node_id)
         pending = self._pending_cad_models.get(key)
         if pending is not None:
-            data, _, color = pending
-            self._pending_cad_models[key] = (data, visible, color)
+            data, _, color, transform = pending
+            self._pending_cad_models[key] = (data, visible, color, transform)
             return
         presentation = self._cad_objects.get(key)
         if not self.is_ready or presentation is None:
@@ -719,6 +724,9 @@ class OccViewerPanel(QWidget):
     def remove_cad_model(self, node_id: UUID, update: bool = True) -> None:
         key = str(node_id)
         self._pending_cad_models.pop(key, None)
+        if self._manipulator_target_key == key:
+            self.detach_manipulator()
+        self._cad_model_bounds.pop(key, None)
         presentation = self._cad_objects.pop(key, None)
         if not self.is_ready or presentation is None:
             return
@@ -728,6 +736,9 @@ class OccViewerPanel(QWidget):
 
     def clear_cad_models(self) -> None:
         self._pending_cad_models.clear()
+        if self._manipulator_target_key is not None:
+            self.detach_manipulator()
+        self._cad_model_bounds.clear()
         if self.is_ready:
             for presentation in self._cad_objects.values():
                 self._display.Context.Remove(presentation, False)
@@ -794,10 +805,24 @@ class OccViewerPanel(QWidget):
             self._update_manipulator_position()
         self._display.Context.UpdateCurrentViewer()
 
-    def attach_point_cloud_manipulator(self, node_id: UUID) -> bool:
+    def set_model_transform(self, node_id: UUID, matrix_value: object) -> None:
         key = str(node_id)
-        current = self._point_cloud_objects.get(key)
-        if not self.is_ready or current is None:
+        presentation = self._point_cloud_objects.get(key)
+        cad_presentation = self._cad_objects.get(key)
+        if not self.is_ready or (presentation is None and cad_presentation is None):
+            return
+        target = presentation[0] if presentation is not None else cad_presentation
+        target.SetLocalTransformation(matrix_to_gp_trsf(matrix_value))
+        self._display.Context.Redisplay(target, False)
+        if self._active_manipulator_key == key:
+            self._update_manipulator_position()
+        self._display.Context.UpdateCurrentViewer()
+
+    def attach_model_manipulator(self, node_id: UUID) -> bool:
+        key = str(node_id)
+        point_cloud = self._point_cloud_objects.get(key)
+        presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key)
+        if not self.is_ready or presentation is None:
             return False
 
         from OCC.Core.AIS import (
@@ -809,7 +834,6 @@ class OccViewerPanel(QWidget):
         )
 
         self.detach_manipulator()
-        presentation, _ = current
         manipulator = AIS_Manipulator()
         manipulator.SetPart(AIS_MM_Scaling, False)
         manipulator.SetPart(AIS_MM_TranslationPlane, False)
@@ -839,7 +863,10 @@ class OccViewerPanel(QWidget):
         if self._viewer is not None and self.is_ready:
             from OCC.Core.AIS import AIS_Manipulator
 
-            self._viewer.set_manipulator(AIS_Manipulator())
+        self._viewer.set_manipulator(AIS_Manipulator())
+
+    def attach_point_cloud_manipulator(self, node_id: UUID) -> bool:
+        return self.attach_model_manipulator(node_id)
     def set_manipulator_coordinate_mode(self, mode: str) -> None:
         if mode != "local":
             raise ValueError("操纵器仅支持点云局部坐标")
@@ -848,10 +875,10 @@ class OccViewerPanel(QWidget):
 
     def _on_manipulator_released(self) -> None:
         key = self._active_manipulator_key
-        current = self._point_cloud_objects.get(key or "")
-        if key is None or current is None:
+        point_cloud = self._point_cloud_objects.get(key or "")
+        presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key or "")
+        if key is None or presentation is None:
             return
-        presentation, _ = current
         matrix = gp_trsf_to_matrix(presentation.LocalTransformation())
         self._update_manipulator_position()
         self.manipulator_transform_changed.emit(key, matrix.tolist())
@@ -860,14 +887,14 @@ class OccViewerPanel(QWidget):
         key = self._active_manipulator_key
         if self._manipulator is None or key is None:
             return
-        current = self._point_cloud_objects.get(key)
-        bounds = self._point_cloud_bounds.get(key)
-        if current is None or bounds is None:
+        point_cloud = self._point_cloud_objects.get(key)
+        presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key)
+        bounds = self._point_cloud_bounds.get(key) or self._cad_model_bounds.get(key)
+        if presentation is None or bounds is None:
             return
 
         from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pnt
 
-        presentation, _ = current
         matrix = gp_trsf_to_matrix(presentation.LocalTransformation())
         bounds_min, bounds_max = bounds
         local_center = (np.asarray(bounds_min) + np.asarray(bounds_max)) * 0.5
