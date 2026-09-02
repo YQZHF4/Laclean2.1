@@ -72,14 +72,6 @@ class OccViewerPanel(QWidget):
         header_layout.addWidget(title)
         header_layout.addStretch(1)
 
-        self._manipulator_toggle = QPushButton("操纵器")
-        self._manipulator_toggle.setCheckable(True)
-        self._manipulator_toggle.setChecked(True)
-        self._manipulator_toggle.setEnabled(False)
-        self._manipulator_toggle.setToolTip("显示或隐藏点云平移/旋转操纵器")
-        self._manipulator_toggle.toggled.connect(self._on_manipulator_toggled)
-        header_layout.addWidget(self._manipulator_toggle)
-
         self._coordinate_mode_combo = QComboBox()
         self._coordinate_mode_combo.addItem("局部", "local")
         self._coordinate_mode_combo.addItem("世界", "world")
@@ -154,6 +146,7 @@ class OccViewerPanel(QWidget):
             from OCC.Display.backend import load_backend
 
             load_backend("pyqt5")
+            from OCC.Core.AIS import AIS_ManipulatorOwner
             from OCC.Display.qtDisplay import qtViewer3dWithManipulator
 
             class TransformAwareViewer(qtViewer3dWithManipulator):
@@ -166,6 +159,7 @@ class OccViewerPanel(QWidget):
                     inner_self.crop_mode = False
                     inner_self.crop_start = None
                     inner_self.crop_current = None
+                    inner_self.manipulator_drag_active = False
 
                 def occ_mouse_pos(inner_self, event) -> QPoint:
                     pos = event.pos()
@@ -209,6 +203,26 @@ class OccViewerPanel(QWidget):
                         inner_self.unsetCursor()
                     inner_self.update()
 
+                def manipulator_hit_at(inner_self, pos: QPoint) -> bool:
+                    inner_self._display.MoveTo(pos.x(), pos.y())
+                    try:
+                        context = inner_self._display.Context
+                        if not context.HasDetected():
+                            inner_self.manipulator.DeactivateCurrentMode()
+                            return False
+                        owner = context.DetectedOwner()
+                        manipulator_owner = AIS_ManipulatorOwner.DownCast(owner)
+                        if manipulator_owner is None or (
+                            hasattr(manipulator_owner, "IsNull")
+                            and manipulator_owner.IsNull()
+                        ):
+                            inner_self.manipulator.DeactivateCurrentMode()
+                            return False
+                        return inner_self.manipulator.HasActiveMode()
+                    except Exception:
+                        inner_self.manipulator.DeactivateCurrentMode()
+                        return False
+
                 def mousePressEvent(inner_self, event) -> None:  # noqa: N802
                     if inner_self.crop_mode:
                         if event.button() == Qt.LeftButton:
@@ -223,12 +237,17 @@ class OccViewerPanel(QWidget):
                     pos = inner_self.occ_mouse_pos(event)
                     inner_self.dragStartPosX = pos.x()
                     inner_self.dragStartPosY = pos.y()
-                    if inner_self.manipulator.HasActiveMode():
+                    inner_self.manipulator_drag_active = False
+                    if (
+                        event.button() == Qt.LeftButton
+                        and inner_self.manipulator_hit_at(pos)
+                    ):
                         inner_self.manipulator.StartTransform(
                             inner_self.dragStartPosX,
                             inner_self.dragStartPosY,
                             inner_self._display.GetView(),
                         )
+                        inner_self.manipulator_drag_active = True
                     else:
                         inner_self._display.StartRotation(
                             inner_self.dragStartPosX,
@@ -249,7 +268,7 @@ class OccViewerPanel(QWidget):
                     buttons = event.buttons()
                     modifiers = event.modifiers()
                     if buttons == Qt.LeftButton and modifiers != Qt.ShiftModifier:
-                        if inner_self.manipulator.HasActiveMode():
+                        if inner_self.manipulator_drag_active:
                             inner_self.trsf = inner_self.manipulator.Transform(
                                 pos.x(), pos.y(), inner_self._display.GetView()
                             )
@@ -309,17 +328,18 @@ class OccViewerPanel(QWidget):
                     pos = inner_self.occ_mouse_pos(event)
                     modifiers = event.modifiers()
                     if event.button() == Qt.LeftButton:
-                        if inner_self.manip_moved:
+                        if inner_self.manipulator_drag_active and inner_self.manip_moved:
                             inner_self.trsf_manip.append(inner_self.trsf)
                             inner_self.manip_moved = False
-                        if modifiers == Qt.ShiftModifier:
+                        if not inner_self.manipulator_drag_active and modifiers == Qt.ShiftModifier:
                             inner_self._display.ShiftSelect(pos.x(), pos.y())
-                        else:
+                        elif not inner_self.manipulator_drag_active:
                             inner_self._display.Select(pos.x(), pos.y())
                             if inner_self._display.selected_shapes is not None:
                                 inner_self.sig_topods_selected.emit(
                                     inner_self._display.selected_shapes
                                 )
+                        inner_self.manipulator_drag_active = False
                     inner_self.cursor = "arrow"
                     if was_moved:
                         inner_self.manipulator_released.emit()
@@ -434,6 +454,30 @@ class OccViewerPanel(QWidget):
             0.14,
             V3d_ZBUFFER,
         )
+
+    @staticmethod
+    def _z_gradient_colors(
+        points: np.ndarray, z_min: float, z_max: float
+    ) -> np.ndarray:
+        if len(points) == 0:
+            return np.empty((0, 3), dtype=np.uint8)
+        if z_max <= z_min:
+            return np.tile(np.array([[0, 0, 255]], dtype=np.uint8), (len(points), 1))
+        t = np.clip((points[:, 2].astype(np.float32) - z_min) / (z_max - z_min), 0.0, 1.0)
+        palette = np.asarray(
+            ((0, 0, 255), (0, 255, 255), (0, 255, 0), (255, 255, 0), (255, 0, 0)),
+            dtype=np.float32,
+        )
+        position = t * (len(palette) - 1)
+        index = np.minimum(position.astype(np.int32), len(palette) - 2)
+        fraction = (position - index)[:, None]
+        gradient = palette[index] + (palette[index + 1] - palette[index]) * fraction
+        return np.rint(gradient).astype(np.uint8)
+
+    @staticmethod
+    def _pack_vertex_color(red: int, green: int, blue: int) -> int:
+        color32 = (255 << 24) | (blue << 16) | (green << 8) | red
+        return color32 - (1 << 32) if color32 >= (1 << 31) else color32
 
     def _set_unavailable(self, message: str) -> None:
         self._occ_error = message
@@ -559,24 +603,25 @@ class OccViewerPanel(QWidget):
 
         self.remove_point_cloud(data.node_id, update=False)
         points, colors = data.display_arrays()
-        has_colors = colors is not None
+        has_colors = colors is not None or len(points) > 0
         vertices = Graphic3d_ArrayOfPoints(int(len(points)), has_colors, False)
 
         if colors is None:
-            for x, y, z in points:
-                vertices.AddVertex(float(x), float(y), float(z))
+            gradient_colors = self._z_gradient_colors(
+                points, float(data.bounds_min[2]), float(data.bounds_max[2])
+            )
+            for (x, y, z), (red, green, blue) in zip(
+                points, gradient_colors, strict=True
+            ):
+                vertices.AddVertex(
+                    gp_Pnt(float(x), float(y), float(z)),
+                    self._pack_vertex_color(int(red), int(green), int(blue)),
+                )
         else:
             for (x, y, z), (red, green, blue) in zip(points, colors, strict=True):
-                color32 = (
-                    (255 << 24)
-                    | (int(blue) << 16)
-                    | (int(green) << 8)
-                    | int(red)
+                color32 = self._pack_vertex_color(
+                    int(red), int(green), int(blue)
                 )
-                # OCCT stores RGBA bits in a uint32, while the SWIG overload is
-                # exposed as signed Standard_Integer. Preserve the bit pattern.
-                if color32 >= (1 << 31):
-                    color32 -= 1 << 32
                 vertices.AddVertex(gp_Pnt(float(x), float(y), float(z)), color32)
 
         presentation = AIS_PointCloud()
@@ -725,7 +770,6 @@ class OccViewerPanel(QWidget):
         key = str(node_id)
         current = self._point_cloud_objects.get(key)
         if not self.is_ready or current is None:
-            self._manipulator_toggle.setEnabled(False)
             self._coordinate_mode_combo.setEnabled(False)
             return False
 
@@ -751,10 +795,6 @@ class OccViewerPanel(QWidget):
         self._manipulator = manipulator
         self._active_manipulator_key = key
         self._manipulator_target_key = key
-        self._manipulator_toggle.blockSignals(True)
-        self._manipulator_toggle.setChecked(True)
-        self._manipulator_toggle.blockSignals(False)
-        self._manipulator_toggle.setEnabled(True)
         self._coordinate_mode_combo.setEnabled(True)
         self._update_manipulator_position()
         self._display.Context.UpdateCurrentViewer()
@@ -779,7 +819,6 @@ class OccViewerPanel(QWidget):
             and self._manipulator_target_key is not None
             and self._manipulator_target_key in self._point_cloud_objects
         )
-        self._manipulator_toggle.setEnabled(has_target)
         self._coordinate_mode_combo.setEnabled(has_target)
 
     def set_manipulator_coordinate_mode(self, mode: str) -> None:
@@ -792,13 +831,6 @@ class OccViewerPanel(QWidget):
             self._coordinate_mode_combo.setCurrentIndex(index)
             self._coordinate_mode_combo.blockSignals(False)
         self._update_manipulator_position()
-
-    def _on_manipulator_toggled(self, checked: bool) -> None:
-        key = self._manipulator_target_key
-        if not checked:
-            self.detach_manipulator(clear_target=False)
-        elif key is not None:
-            self.attach_point_cloud_manipulator(UUID(key))
 
     def _on_coordinate_mode_changed(self) -> None:
         mode = self._coordinate_mode_combo.currentData()

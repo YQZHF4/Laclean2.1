@@ -524,13 +524,7 @@ class MainWindow(QMainWindow):
         if node is not None and node.kind is NodeKind.POINT_CLOUD:
             count = int(node.metadata.get("point_count", 0))
             self._status_message.setText(f"{node.name} · {count:,} 点")
-            if node.visible:
-                self.viewer.set_manipulator_coordinate_mode(
-                    str(node.metadata.get("coordinate_mode", "local"))
-                )
-                self.viewer.attach_point_cloud_manipulator(node.node_id)
-            else:
-                self.viewer.detach_manipulator()
+            self.viewer.detach_manipulator()
         elif (
             node is not None
             and node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT}
@@ -744,8 +738,6 @@ class MainWindow(QMainWindow):
             )
             if data is self.point_clouds.get(node.node_id):
                 node.metadata["display_point_count"] = displayed
-            if self._selected_node is node and node.visible:
-                self.viewer.attach_point_cloud_manipulator(node.node_id)
         except Exception as exc:
             QMessageBox.warning(
                 self, "点云预览显示失败", log_exception("显示点云预览", exc)
@@ -942,18 +934,10 @@ class MainWindow(QMainWindow):
         return self.document.find(self._crop_node_id)
 
     def _finish_crop_session(self, *, reattach: bool = True) -> None:
-        node = self._crop_node()
         self.viewer.cancel_rectangle_crop(emit_signal=False)
         self._crop_node_id = None
         self._crop_before_state = None
         self._crop_selection = None
-        if (
-            reattach
-            and node is not None
-            and node.visible
-            and self._selected_node is node
-        ):
-            self.viewer.attach_point_cloud_manipulator(node.node_id)
 
     def undo_edit(self) -> bool:
         if not self._can_run_edit_history_action():
@@ -1199,12 +1183,6 @@ class MainWindow(QMainWindow):
                 )
         if loaded:
             self.viewer.fit_all()
-        if (
-            self._selected_node is not None
-            and self._selected_node.kind is NodeKind.POINT_CLOUD
-            and self._selected_node.visible
-        ):
-            self.viewer.attach_point_cloud_manipulator(self._selected_node.node_id)
         all_errors = [*errors, *render_errors]
         if all_errors:
             QMessageBox.warning(
