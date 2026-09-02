@@ -84,7 +84,7 @@ class PointCloudService:
                 "bounds_min": bounds_min,
                 "bounds_max": bounds_max,
                 "transform": np.eye(4, dtype=float).tolist(),
-                "point_size": 2.0,
+                "point_size": 9.0,
                 "coordinate_mode": "local",
             },
         )

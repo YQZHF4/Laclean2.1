@@ -415,8 +415,9 @@ class OccViewerPanel(QWidget):
         from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
 
         view = self._display.GetView()
-        dark = Quantity_Color(0.02, 0.02, 0.02, Quantity_TOC_RGB)
-        view.SetBgGradientColors(dark, dark, Aspect_GFM_VER)
+        top = Quantity_Color(0.008, 0.010, 0.013, Quantity_TOC_RGB)
+        bottom = Quantity_Color(0.012, 0.015, 0.019, Quantity_TOC_RGB)
+        view.SetBgGradientColors(top, bottom, Aspect_GFM_VER)
         params = view.ChangeRenderingParams()
         params.NbMsaaSamples = 8
         params.IsAntialiasingEnabled = True
@@ -424,12 +425,12 @@ class OccViewerPanel(QWidget):
 
     def _display_view_triedron(self) -> None:
         from OCC.Core.Aspect import Aspect_TOTP_LEFT_LOWER
-        from OCC.Core.Quantity import Quantity_Color, Quantity_NOC_BLACK
+        from OCC.Core.Quantity import Quantity_Color, Quantity_NOC_WHITE
         from OCC.Core.V3d import V3d_ZBUFFER
 
         self._display.GetView().TriedronDisplay(
             Aspect_TOTP_LEFT_LOWER,
-            Quantity_Color(Quantity_NOC_BLACK),
+            Quantity_Color(Quantity_NOC_WHITE),
             0.14,
             V3d_ZBUFFER,
         )
@@ -536,7 +537,7 @@ class OccViewerPanel(QWidget):
         data: PointCloudData,
         *,
         visible: bool = True,
-        point_size: float = 2.0,
+        point_size: float = 4.0,
         transform: object | None = None,
         fit: bool = True,
     ) -> int:
@@ -581,10 +582,8 @@ class OccViewerPanel(QWidget):
         presentation = AIS_PointCloud()
         presentation.SetPoints(vertices)
         presentation.SetLocalTransformation(matrix_to_gp_trsf(transform_value))
-        default_color = Quantity_Color(0.36, 0.78, 0.96, Quantity_TOC_RGB)
-        presentation.Attributes().SetPointAspect(
-            Prs3d_PointAspect(Aspect_TOM_POINT, default_color, float(point_size))
-        )
+        presentation.SetColor(Quantity_Color(0.8, 0.8, 0.8, Quantity_TOC_RGB))  # 对象级颜色设置
+
         self._display.Context.Display(presentation, False)
         if not visible:
             self._display.Context.Erase(presentation, False)

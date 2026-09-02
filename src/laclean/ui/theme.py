@@ -124,7 +124,11 @@ QFrame#viewerHeader {
     background-color: #1d2228;
     border-bottom: 1px solid #343b45;
 }
-QLabel#viewerTitle { font-weight: 600; color: #d9e1eb; }
+QLabel#viewerTitle {
+    background-color: transparent;
+    font-weight: 600;
+    color: #d9e1eb;
+}
 QLabel#cropModeBadge {
     color: #dff5ff;
     background-color: #105f84;

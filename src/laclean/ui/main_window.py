@@ -738,7 +738,7 @@ class MainWindow(QMainWindow):
             displayed = self.viewer.display_point_cloud(
                 data,
                 visible=node.visible,
-                point_size=float(node.metadata.get("point_size", 2.0)),
+                point_size=float(node.metadata.get("point_size", 4.0)),
                 transform=node.metadata.get("transform"),
                 fit=False,
             )
@@ -1135,7 +1135,7 @@ class MainWindow(QMainWindow):
             displayed = self.viewer.display_point_cloud(
                 result.data,
                 visible=result.node.visible,
-                point_size=float(result.node.metadata.get("point_size", 2.0)),
+                point_size=float(result.node.metadata.get("point_size", 4.0)),
                 transform=result.node.metadata.get("transform"),
             )
             result.node.metadata["display_point_count"] = displayed
@@ -1188,7 +1188,7 @@ class MainWindow(QMainWindow):
                 displayed = self.viewer.display_point_cloud(
                     data,
                     visible=node.visible,
-                    point_size=float(node.metadata.get("point_size", 2.0)),
+                    point_size=float(node.metadata.get("point_size", 4.0)),
                     transform=node.metadata.get("transform"),
                     fit=False,
                 )
