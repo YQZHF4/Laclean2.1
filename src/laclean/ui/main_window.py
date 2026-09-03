@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from uuid import UUID
@@ -15,10 +16,13 @@ from PyQt5.QtWidgets import (
     QDialog,
     QDockWidget,
     QFileDialog,
+    QInputDialog,
+    QLineEdit,
     QLabel,
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QScrollArea,
     QStyle,
     QToolBar,
 )
@@ -46,7 +50,7 @@ from laclean.ui.icons import make_toolbar_icon
 from laclean.ui.new_project_dialog import NewProjectDialog
 from laclean.ui.occ_viewer import OccViewerPanel
 from laclean.ui.point_cloud_processing_dialog import PointCloudProcessingDialog
-from laclean.ui.properties_panel import PropertiesPanel
+from laclean.ui.properties_panel import OperationPanel, PropertiesPanel
 from laclean.ui.scene_tree import SceneTreeWidget
 from laclean.workers.point_cloud_tasks import (
     CadModelImportThread,
@@ -58,6 +62,22 @@ from laclean.workers.point_cloud_tasks import (
     PointCloudRectangleSelectionThread,
     PointCloudRestoreThread,
 )
+
+
+class ProcessingScrollArea(QScrollArea):
+    """Keep embedded processing controls clear of an overlay scrollbar."""
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        super().resizeEvent(event)
+        self.fit_content_width()
+
+    def fit_content_width(self) -> None:
+        widget = self.widget()
+        if widget is None:
+            return
+        scrollbar_width = self.verticalScrollBar().sizeHint().width()
+        content_width = max(1, self.viewport().width() - scrollbar_width - 2)
+        widget.setFixedWidth(content_width)
 
 
 class MainWindow(QMainWindow):
@@ -85,6 +105,10 @@ class MainWindow(QMainWindow):
         self._crop_selection: RectangleSelection | None = None
         self._scratch_project_directory: tempfile.TemporaryDirectory | None = None
         self.actions: dict[str, QAction] = {}
+        self._operation_node: SceneNode | None = None
+        self._pending_pose: tuple[UUID, object] | None = None
+        self._pending_pose_matrix: object | None = None
+        self._processing_scroll_area: QScrollArea | None = None
 
         self._create_actions()
         self._create_menus()
@@ -267,6 +291,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.scene_dock)
 
         self.properties = PropertiesPanel(self)
+        self.operation_panel = OperationPanel(self)
         self.properties_dock = QDockWidget("属性与任务", self)
         self.properties_dock.setObjectName("propertiesDock")
         self.properties_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
@@ -317,6 +342,10 @@ class MainWindow(QMainWindow):
         )
         self.viewer.crop_rectangle_drawn.connect(self._on_crop_rectangle_drawn)
         self.viewer.crop_cancelled.connect(self._on_crop_cancelled)
+        self.operation_panel.confirmed.connect(self._on_operation_confirmed)
+        self.operation_panel.cancelled.connect(self._on_operation_cancelled)
+        self.operation_panel.pose_changed.connect(self._on_operation_pose_changed)
+        self.operation_panel.crop_redraw_requested.connect(self._on_crop_redraw_requested)
 
     def new_project(self) -> bool:
         if not self._confirm_close_current_project():
@@ -522,6 +551,8 @@ class MainWindow(QMainWindow):
         self._status_message.setText(message if success else "三维视图未就绪")
 
     def _on_node_selected(self, node: SceneNode | None) -> None:
+        if self._operation_node is not None and node is not self._operation_node:
+            self._on_operation_cancelled()
         self._selected_node = node
         self.properties.set_node(node)
         if node is not None and node.kind is NodeKind.POINT_CLOUD:
@@ -558,17 +589,35 @@ class MainWindow(QMainWindow):
                 elif node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
                     self.viewer.set_cad_model_visible(node.node_id, node.visible)
             return
-        if action_id == "save_project":
-            self.save_project()
+        if action_id in {
+            "import_point_cloud",
+            "import_cad",
+            "import_robot",
+        }:
+            if action_id == "import_point_cloud":
+                self.import_point_cloud()
+            elif action_id == "import_cad":
+                self.import_cad_model(NodeKind.CAD_MODEL)
+            else:
+                self.import_cad_model(NodeKind.ROBOT)
             return
-        if action_id == "import_point_cloud":
-            self.import_point_cloud()
+        if action_id == "rename_node" and node is not None:
+            self._rename_node_dialog(node)
             return
-        if action_id == "import_cad":
-            self.import_cad_model(NodeKind.CAD_MODEL)
+        if action_id == "delete_node" and node is not None:
+            self._delete_node_confirm(node)
             return
-        if action_id == "import_robot":
-            self.import_cad_model(NodeKind.ROBOT)
+        if action_id in {
+            "set_point_cloud_pose",
+            "set_cad_model_pose",
+            "process_point_cloud",
+            "crop_point_cloud",
+            "save_project",
+            "forward_kinematics",
+            "inverse_kinematics",
+            "collision_check",
+        }:
+            self._begin_tree_operation(action_id, node)
             return
         if action_id in {"set_point_cloud_pose", "set_cad_model_pose"} and node is not None:
             self.scene_tree.select_node(node.node_id)
@@ -582,6 +631,204 @@ class MainWindow(QMainWindow):
             self.start_point_cloud_crop(node)
             return
         self._reserved_action(action_id)
+
+    def _rename_node_dialog(self, node: SceneNode) -> None:
+        name, accepted = QInputDialog.getText(
+            self,
+            "重命名节点",
+            "节点名称：",
+            QLineEdit.Normal,
+            node.name,
+        )
+        if not accepted:
+            return
+        if not self.application.rename_node(node, name):
+            QMessageBox.warning(self, "重命名失败", "名称不能为空，且项目根节点不能重命名。")
+            return
+        self.scene_tree.rebuild()
+        self.scene_tree.select_node(node.node_id)
+        self._update_window_title()
+        self._status_message.setText(f"已重命名：{node.name}")
+
+    def _delete_node_confirm(self, node: SceneNode) -> None:
+        choice = QMessageBox.warning(
+            self,
+            "删除节点",
+            f"确定删除节点“{node.name}”吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self.viewer.detach_manipulator()
+        if node.kind is NodeKind.POINT_CLOUD:
+            self.viewer.remove_point_cloud(node.node_id)
+        elif node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
+            self.viewer.remove_cad_model(node.node_id)
+        if self.application.delete_node(node):
+            self.scene_tree.rebuild()
+            self._update_window_title()
+            self._status_message.setText(f"已删除：{node.name}")
+
+    def _begin_tree_operation(self, action_id: str, node: SceneNode | None) -> None:
+        if action_id != "save_project" and node is None:
+            return
+        if self._processing_dialog is not None and action_id != "process_point_cloud":
+            if self._point_cloud_task is not None and self._point_cloud_task.isRunning():
+                QMessageBox.information(self, "点云任务", "当前点云任务完成后才能切换操作。")
+                return
+            self._processing_dialog.reject()
+        self._operation_node = node
+        if action_id == "process_point_cloud" and node is not None:
+            self._begin_processing_panel(node)
+            return
+        payload: dict[str, object] = {}
+        title = {
+            "set_point_cloud_pose": "设置点云位置",
+            "set_cad_model_pose": "设置数模位置",
+            "process_point_cloud": "基本点云处理",
+            "crop_point_cloud": "手动矩形裁剪",
+            "rename_node": "重命名节点",
+            "delete_node": "删除节点",
+            "save_project": "保存项目",
+            "forward_kinematics": "正运动学（预留）",
+            "inverse_kinematics": "逆运动学（预留）",
+            "collision_check": "碰撞检测（预留）",
+        }[action_id]
+        if action_id == "rename_node" and node is not None:
+            payload["name"] = node.name
+        if action_id in {"set_point_cloud_pose", "set_cad_model_pose"} and node is not None:
+            self._pending_pose = (
+                node.node_id,
+                deepcopy(node.metadata.get("transform")),
+            )
+            self._pending_pose_matrix = deepcopy(node.metadata.get("transform"))
+            self.scene_tree.select_node(node.node_id)
+            self.viewer.attach_model_manipulator(node.node_id)
+        self.properties_dock.setWidget(self.operation_panel)
+        self.operation_panel.begin(action_id, title, node, **payload)
+        if action_id == "crop_point_cloud" and node is not None:
+            self.start_point_cloud_crop(node)
+
+    def _begin_processing_panel(self, node: SceneNode) -> None:
+        if self._point_cloud_task is not None and self._point_cloud_task.isRunning():
+            QMessageBox.information(self, "点云任务", "已有点云任务正在执行，请稍候。")
+            return
+        data = self.point_clouds.get(node.node_id)
+        if data is None:
+            QMessageBox.warning(self, "点云尚未就绪", "该点云仍在加载或加载失败。")
+            return
+        if self._processing_dialog is not None:
+            self._processing_dialog.raise_()
+            self._processing_dialog.activateWindow()
+            return
+
+        dialog = PointCloudProcessingDialog(node.name, data.point_count, data.unit, self)
+        dialog.preview_requested.connect(self._start_point_cloud_preview)
+        dialog.preview_invalidated.connect(self._restore_processing_original)
+        dialog.apply_requested.connect(self._apply_point_cloud_preview)
+        dialog.finished.connect(self._on_processing_dialog_closed)
+        dialog.setWindowFlags(Qt.Widget)
+        dialog.setModal(False)
+        dialog.layout().setContentsMargins(12, 12, 28, 12)
+        scroll_area = ProcessingScrollArea(self.properties_dock)
+        scroll_area.setObjectName("processingScrollArea")
+        scroll_area.setWidgetResizable(False)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setWidget(dialog)
+        QTimer.singleShot(0, scroll_area.fit_content_width)
+        self._processing_scroll_area = scroll_area
+        self.properties_dock.setWidget(scroll_area)
+        self._processing_dialog = dialog
+        self._processing_node_id = node.node_id
+        self._processing_original = data
+        self._processing_preview = None
+        self._processing_applied = False
+        self.scene_tree.select_node(node.node_id)
+        dialog.show()
+
+    def _on_operation_confirmed(self, action_id: str, payload: object) -> None:
+        node = self._operation_node
+        values = payload if isinstance(payload, dict) else {}
+        if action_id == "save_project":
+            if self.save_project():
+                self._clear_operation()
+                return
+            return
+        elif action_id in {"set_point_cloud_pose", "set_cad_model_pose"} and node is not None:
+            if self._pending_pose is not None and self._pending_pose[0] == node.node_id:
+                matrix = self._pending_pose_matrix
+                if matrix is not None:
+                    self.application.update_transform(node.node_id, matrix)
+            self.viewer.detach_manipulator()
+            self._pending_pose = None
+            self._pending_pose_matrix = None
+        elif action_id == "process_point_cloud" and node is not None:
+            self._clear_operation()
+            self.open_point_cloud_processing(node)
+            return
+        elif action_id == "crop_point_cloud" and node is not None:
+            if self._crop_selection is None:
+                self.operation_panel.set_crop_status("请先完成矩形框选")
+                return
+            keep_selected = values.get("crop_mode") == "keep"
+            self._start_crop_apply(keep_selected=keep_selected)
+            return
+        elif action_id in {"forward_kinematics", "inverse_kinematics", "collision_check"}:
+            self._reserved_action(action_id)
+        self._clear_operation()
+        self._update_window_title()
+
+    def _on_operation_cancelled(self) -> None:
+        if self._crop_node_id is not None:
+            node = self._crop_node()
+            name = node.name if node is not None else "点云"
+            self._finish_crop_session()
+            self._clear_operation()
+            self._status_message.setText(f"{name}：已取消矩形裁剪")
+            return
+        if self._pending_pose is not None:
+            node_id, transform = self._pending_pose
+            node = self.document.find(node_id)
+            if node is not None and transform is not None:
+                self.viewer.detach_manipulator()
+                # The presentation is already in the viewer. Restoring its
+                # transformation avoids rebuilding a potentially large cloud.
+                restored = self.viewer.set_model_transform(node_id, transform)
+                if not restored and node.kind is NodeKind.POINT_CLOUD and node_id in self.point_clouds:
+                    # Keep a fallback for a presentation that disappeared
+                    # while the operation was active.
+                    self.viewer.display_point_cloud(
+                        self.point_clouds[node_id],
+                        visible=node.visible,
+                        point_size=float(node.metadata.get("point_size", 4.0)),
+                        transform=transform,
+                        fit=False,
+                    )
+                elif not restored and node.kind is NodeKind.CAD_MODEL and node_id in self.cad_models:
+                    self.viewer.display_cad_model(
+                        self.cad_models[node_id],
+                        visible=node.visible,
+                        color=self._cad_display_color(node),
+                        transform=transform,
+                        fit=False,
+                    )
+            self._pending_pose = None
+        self._pending_pose_matrix = None
+        self._clear_operation()
+
+    def _on_operation_pose_changed(self, matrix: object) -> None:
+        if self._pending_pose is None:
+            return
+        node_id, _original = self._pending_pose
+        self._pending_pose_matrix = deepcopy(matrix)
+        self.viewer.set_model_transform(node_id, matrix)
+        self._status_message.setText("位置参数已暂存，点击确认后写入项目")
+
+    def _clear_operation(self) -> None:
+        self._operation_node = None
+        self.operation_panel.clear_operation()
+        self.properties_dock.setWidget(self.properties)
 
     def open_point_cloud_processing(self, node: SceneNode) -> bool:
         if node.kind is not NodeKind.POINT_CLOUD:
@@ -733,6 +980,12 @@ class MainWindow(QMainWindow):
         self._processing_original = None
         self._processing_preview = None
         self._processing_applied = False
+        self._operation_node = None
+        if self.properties_dock.widget() is not self.properties:
+            self.properties_dock.setWidget(self.properties)
+        if self._processing_scroll_area is not None:
+            self._processing_scroll_area.deleteLater()
+            self._processing_scroll_area = None
 
     def start_point_cloud_crop(self, node: SceneNode) -> bool:
         if node.kind is not NodeKind.POINT_CLOUD:
@@ -808,33 +1061,19 @@ class MainWindow(QMainWindow):
             return
         self._crop_selection = selection
         if selection.selected_count == 0:
-            QMessageBox.information(
-                self,
-                "矩形框选",
-                "矩形范围内没有点，请调整视角或重新框选。",
+            self.operation_panel.set_crop_selection(
+                selection.selected_count, selection.total_count
             )
-            self._finish_crop_session()
+            self.operation_panel.set_crop_status("矩形范围内没有点，请重新绘制")
+            self.viewer.start_rectangle_crop()
             return
 
-        message = QMessageBox(self)
-        message.setWindowTitle("矩形框选结果")
-        message.setIcon(QMessageBox.Question)
-        message.setText(
-            f"穿透选中 {selection.selected_count:,} / {selection.total_count:,} 点"
+        self.operation_panel.set_crop_selection(
+            selection.selected_count, selection.total_count
         )
-        message.setInformativeText("请选择如何处理框选区域。此操作之后可以撤销或重做。")
-        keep_button = message.addButton("保留框内", QMessageBox.AcceptRole)
-        delete_button = message.addButton("删除框内", QMessageBox.DestructiveRole)
-        message.addButton("取消", QMessageBox.RejectRole)
-        message.exec_()
-        clicked = message.clickedButton()
-        if clicked is keep_button:
-            self._start_crop_apply(keep_selected=True)
-        elif clicked is delete_button:
-            self._start_crop_apply(keep_selected=False)
-        else:
-            self._finish_crop_session()
-            self._status_message.setText(f"{node.name}：已取消矩形裁剪")
+        self._status_message.setText(
+            f"{node.name}：矩形框选完成，请在右侧面板确认裁剪方式"
+        )
 
     def _start_crop_apply(self, *, keep_selected: bool) -> None:
         node = self._crop_node()
@@ -848,6 +1087,7 @@ class MainWindow(QMainWindow):
         data = self.point_clouds.get(node.node_id)
         if data is None:
             return
+        self.viewer.cancel_rectangle_crop(emit_signal=False)
 
         task = PointCloudCropPersistThread(
             data,
@@ -875,8 +1115,10 @@ class MainWindow(QMainWindow):
             node, before, cropped, persisted
         )
         command_text = command.text
+        self._display_processing_data(node, cropped.data)
         self._update_edit_actions()
         self._finish_crop_session()
+        self._clear_operation()
         memory_note = (
             f"；为控制内存已释放 {trimmed_commands} 条较早历史"
             if trimmed_commands
@@ -888,15 +1130,26 @@ class MainWindow(QMainWindow):
         )
 
     def _on_point_cloud_crop_failed(self, message: str) -> None:
-        self._finish_crop_session()
+        self.operation_panel.set_crop_status(message)
         self._status_message.setText("矩形裁剪失败")
-        QMessageBox.critical(self, "矩形裁剪失败", message)
 
     def _on_crop_cancelled(self) -> None:
         node = self._crop_node()
         name = node.name if node is not None else "点云"
         self._finish_crop_session()
+        self._clear_operation()
         self._status_message.setText(f"{name}：已取消矩形框选")
+
+    def _on_crop_redraw_requested(self) -> None:
+        node = self._crop_node()
+        if node is None or (
+            self._point_cloud_task is not None and self._point_cloud_task.isRunning()
+        ):
+            return
+        self._crop_selection = None
+        self.operation_panel.reset_crop_selection()
+        if self.viewer.start_rectangle_crop():
+            self._status_message.setText("矩形框选：请重新按住左键拖动")
 
     def _crop_node(self) -> SceneNode | None:
         if self._crop_node_id is None:
@@ -1234,9 +1487,23 @@ class MainWindow(QMainWindow):
 
     def _on_manipulator_transform_changed(self, node_id: str, matrix: object) -> None:
         try:
-            node = self.application.update_transform(UUID(node_id), matrix)
+            node_id_value = UUID(node_id)
         except ValueError:
             return
+        if self._pending_pose is not None and self._pending_pose[0] == node_id_value:
+            self._pending_pose_matrix = deepcopy(matrix)
+            self.operation_panel.set_pose_matrix(matrix)
+            from laclean.core.transforms import pose_from_matrix
+
+            translation, rotation = pose_from_matrix(matrix)
+            self._status_message.setText(
+                "暂存位置 "
+                f"X {translation[0]:.2f}  Y {translation[1]:.2f}  Z {translation[2]:.2f} mm · "
+                "旋转 "
+                f"Rx {rotation[0]:.2f}°  Ry {rotation[1]:.2f}°  Rz {rotation[2]:.2f}°"
+            )
+            return
+        node = self.application.update_transform(node_id_value, matrix)
         if node is None:
             return
         self._update_window_title()

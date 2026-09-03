@@ -56,6 +56,35 @@ class ApplicationController:
         self.document.modified = True
         return True
 
+    def rename_node(self, node: SceneNode, name: str) -> bool:
+        cleaned = str(name).strip()
+        if not cleaned or node.kind is NodeKind.PROJECT:
+            return False
+        node.name = cleaned
+        if node.kind is NodeKind.POINT_CLOUD and node.node_id in self.point_clouds:
+            self.point_clouds[node.node_id].name = cleaned
+        if node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT} and node.node_id in self.cad_models:
+            self.cad_models[node.node_id].name = cleaned
+        self.document.modified = True
+        return True
+
+    def delete_node(self, node: SceneNode) -> bool:
+        if node.kind is NodeKind.PROJECT:
+            return False
+
+        def remove_from(parent: SceneNode) -> bool:
+            if node in parent.children:
+                parent.children.remove(node)
+                return True
+            return any(remove_from(child) for child in parent.children)
+
+        if not remove_from(self.document.root):
+            return False
+        self.point_clouds.pop(node.node_id, None)
+        self.cad_models.pop(node.node_id, None)
+        self.document.modified = True
+        return True
+
     def update_transform(self, node_id: UUID, matrix: object) -> SceneNode | None:
         node = self.find_node(node_id)
         if node is None or node.kind not in {NodeKind.POINT_CLOUD, NodeKind.CAD_MODEL}:

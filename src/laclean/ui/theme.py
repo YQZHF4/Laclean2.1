@@ -92,7 +92,23 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border-color: #168bc2; }
 
 QScrollArea { border: 0; }
+QScrollArea#propertiesScrollArea,
+QScrollArea#propertiesScrollArea > QWidget,
+QWidget#propertiesContent,
+QFrame#operationPanel,
+QDialog#pointCloudProcessingDialog,
+QScrollArea#processingScrollArea,
+QScrollArea#processingScrollArea > QWidget {
+    background-color: #171a1f;
+}
+QScrollArea#operationScrollArea,
+QScrollArea#operationScrollArea > QWidget,
+QWidget#operationBody,
+QWidget#operationViewport {
+    background-color: #171a1f;
+}
 QGroupBox {
+    background-color: #20252c;
     border: 1px solid #313944;
     border-radius: 6px;
     margin-top: 12px;

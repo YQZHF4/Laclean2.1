@@ -65,6 +65,7 @@ def select_points_in_screen_rectangle(
         stop = min(start + max(1, int(chunk_size)), data.point_count)
         points = np.asarray(data.points[start:stop], dtype=np.float32)
         # Affine multiplication without allocating an N×4 homogeneous input.
+        # OCC's matrices are exposed in the project's row-vector layout.
         clip = points @ combined[:, :3].T
         clip += combined[:, 3]
         w = clip[:, 3]

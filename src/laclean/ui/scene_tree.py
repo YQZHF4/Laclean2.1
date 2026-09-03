@@ -165,10 +165,10 @@ class SceneTreeWidget(QTreeWidget):
         elif node.kind is NodeKind.CAD_MODEL:
             self._add_action(menu, "设置数模位置", SceneAction.SET_CAD_MODEL_POSE, node)
         elif node.kind is NodeKind.ROBOT:
-            self._add_action(menu, "正运动学", SceneAction.FORWARD_KINEMATICS, node)
-            self._add_action(menu, "逆运动学", SceneAction.INVERSE_KINEMATICS, node)
+            self._add_action(menu, "正运动学（预留）", SceneAction.FORWARD_KINEMATICS, node)
+            self._add_action(menu, "逆运动学（预留）", SceneAction.INVERSE_KINEMATICS, node)
             menu.addSeparator()
-            self._add_action(menu, "碰撞检测", SceneAction.COLLISION_CHECK, node)
+            self._add_action(menu, "碰撞检测（预留）", SceneAction.COLLISION_CHECK, node)
         elif group == "point_clouds":
             self._add_action(menu, "导入点云…", SceneAction.IMPORT_POINT_CLOUD, node)
         elif group == "cad_models":

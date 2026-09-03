@@ -13,7 +13,7 @@ from laclean.core.point_cloud import PointCloudData
 from laclean.core.cad_model import CadModelData
 from laclean.core.transforms import gp_trsf_to_matrix, matrix_to_gp_trsf
 
-from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -149,6 +149,8 @@ class OccViewerPanel(QWidget):
                     inner_self.crop_current = None
                     inner_self.manipulator_drag_active = False
                     inner_self.crop_rubber_band = None
+                    inner_self.crop_selection_locked = False
+                    inner_self.crop_drawing_active = False
 
                 def occ_mouse_pos(inner_self, event) -> QPoint:
                     pos = event.pos()
@@ -197,20 +199,27 @@ class OccViewerPanel(QWidget):
                         ),
                     ).normalized()
 
-                def set_crop_mode(inner_self, enabled: bool) -> None:
+                def set_crop_mode(inner_self, enabled: bool, *, clear_rectangle: bool = True) -> None:
                     inner_self.crop_mode = bool(enabled)
+                    inner_self.crop_selection_locked = False
+                    inner_self.crop_drawing_active = False
                     inner_self.crop_start = None
                     inner_self.crop_current = None
                     context = inner_self._display.Context
                     if enabled:
+                        if inner_self.crop_rubber_band is not None:
+                            context.Remove(inner_self.crop_rubber_band, False)
+                            inner_self.crop_rubber_band = None
                         inner_self.setCursor(Qt.CrossCursor)
                         inner_self.setFocus()
                     else:
                         inner_self.unsetCursor()
-                        if inner_self.crop_rubber_band is not None:
+                        if clear_rectangle and inner_self.crop_rubber_band is not None:
                             context.Remove(inner_self.crop_rubber_band, False)
                             inner_self.crop_rubber_band = None
                             context.UpdateCurrentViewer()
+                        elif not clear_rectangle and inner_self.crop_rubber_band is not None:
+                            inner_self.crop_selection_locked = True
                     inner_self.update()
 
                 def update_crop_rubber_band(inner_self) -> None:
@@ -272,10 +281,17 @@ class OccViewerPanel(QWidget):
                         return False
 
                 def mousePressEvent(inner_self, event) -> None:  # noqa: N802
-                    if inner_self.crop_mode:
+                    if inner_self.crop_mode or inner_self.crop_selection_locked:
+                        if inner_self.crop_selection_locked:
+                            if event.button() == Qt.RightButton:
+                                inner_self.set_crop_mode(False)
+                                inner_self.crop_interaction_cancelled.emit()
+                            event.accept()
+                            return
                         if event.button() == Qt.LeftButton:
                             inner_self.crop_start = event.pos()
                             inner_self.crop_current = event.pos()
+                            inner_self.crop_drawing_active = True
                             inner_self.update_crop_rubber_band()
                         elif event.button() == Qt.RightButton:
                             inner_self.set_crop_mode(False)
@@ -304,7 +320,10 @@ class OccViewerPanel(QWidget):
                         )
 
                 def mouseMoveEvent(inner_self, event) -> None:  # noqa: N802
-                    if inner_self.crop_mode:
+                    if inner_self.crop_mode or inner_self.crop_selection_locked:
+                        if inner_self.crop_selection_locked:
+                            event.accept()
+                            return
                         if (
                             inner_self.crop_start is not None
                             and event.buttons() & Qt.LeftButton
@@ -349,12 +368,15 @@ class OccViewerPanel(QWidget):
                         inner_self.unsetCursor()
 
                 def mouseReleaseEvent(inner_self, event) -> None:  # noqa: N802
-                    if inner_self.crop_mode:
+                    if inner_self.crop_mode or inner_self.crop_selection_locked:
+                        if inner_self.crop_selection_locked:
+                            event.accept()
+                            return
                         if event.button() == Qt.LeftButton and inner_self.crop_start is not None:
                             rectangle = QRect(
                                 inner_self.crop_start, event.pos()
                             ).normalized()
-                            inner_self.set_crop_mode(False)
+                            inner_self.set_crop_mode(False, clear_rectangle=False)
                             if rectangle.width() >= 4 and rectangle.height() >= 4:
                                 screen_rectangle = inner_self.screen_rect_from_qt_rect(
                                     rectangle
@@ -391,8 +413,31 @@ class OccViewerPanel(QWidget):
                     if was_moved:
                         inner_self.manipulator_released.emit()
 
+                def wheelEvent(inner_self, event) -> None:  # noqa: N802
+                    if inner_self.crop_drawing_active or inner_self.crop_selection_locked:
+                        event.accept()
+                        return
+                    super(TransformAwareViewer, inner_self).wheelEvent(event)
+
+                def event(inner_self, event) -> bool:  # noqa: N802 - Qt API name
+                    # Consume wheel events before qtViewer3d can route them to
+                    # its built-in zoom handler.
+                    if (
+                        event.type() == QEvent.Wheel
+                        and (
+                            inner_self.crop_drawing_active
+                            or inner_self.crop_selection_locked
+                        )
+                    ):
+                        event.accept()
+                        return True
+                    return super(TransformAwareViewer, inner_self).event(event)
+
                 def keyPressEvent(inner_self, event) -> None:  # noqa: N802
-                    if inner_self.crop_mode and event.key() == Qt.Key_Escape:
+                    if (
+                        (inner_self.crop_mode or inner_self.crop_selection_locked)
+                        and event.key() == Qt.Key_Escape
+                    ):
                         inner_self.set_crop_mode(False)
                         inner_self.crop_interaction_cancelled.emit()
                         event.accept()
@@ -553,13 +598,15 @@ class OccViewerPanel(QWidget):
         self._viewer.set_crop_mode(True)
         return True
 
-    def cancel_rectangle_crop(self, *, emit_signal: bool = True) -> None:
+    def cancel_rectangle_crop(
+        self, *, emit_signal: bool = True, clear_rectangle: bool = True
+    ) -> None:
         was_active = self._crop_active
         self._crop_active = False
         self._crop_badge.hide()
         self._cancel_crop_button.hide()
         if self._viewer is not None:
-            self._viewer.set_crop_mode(False)
+            self._viewer.set_crop_mode(False, clear_rectangle=clear_rectangle)
         if was_active and emit_signal:
             self.crop_cancelled.emit()
 
@@ -598,7 +645,7 @@ class OccViewerPanel(QWidget):
         )
 
     def _on_crop_rectangle_completed(self, rectangle: object) -> None:
-        self.cancel_rectangle_crop(emit_signal=False)
+        self.cancel_rectangle_crop(emit_signal=False, clear_rectangle=False)
         self.crop_rectangle_drawn.emit(rectangle)
 
     def _on_crop_interaction_cancelled(self) -> None:
@@ -805,18 +852,19 @@ class OccViewerPanel(QWidget):
             self._update_manipulator_position()
         self._display.Context.UpdateCurrentViewer()
 
-    def set_model_transform(self, node_id: UUID, matrix_value: object) -> None:
+    def set_model_transform(self, node_id: UUID, matrix_value: object) -> bool:
         key = str(node_id)
         presentation = self._point_cloud_objects.get(key)
         cad_presentation = self._cad_objects.get(key)
         if not self.is_ready or (presentation is None and cad_presentation is None):
-            return
+            return False
         target = presentation[0] if presentation is not None else cad_presentation
         target.SetLocalTransformation(matrix_to_gp_trsf(matrix_value))
         self._display.Context.Redisplay(target, False)
         if self._active_manipulator_key == key:
             self._update_manipulator_position()
         self._display.Context.UpdateCurrentViewer()
+        return True
 
     def attach_model_manipulator(self, node_id: UUID) -> bool:
         key = str(node_id)

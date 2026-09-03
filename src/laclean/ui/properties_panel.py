@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QButtonGroup,
+    QCheckBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
+    QGroupBox,
     QLabel,
+    QLineEdit,
+    QPushButton,
+    QSizePolicy,
     QScrollArea,
+    QHBoxLayout,
     QVBoxLayout,
     QWidget,
 )
 
 from laclean.core.scene import NodeKind, SceneNode
 from laclean.core.error_handling import format_bytes
-from laclean.core.transforms import pose_from_matrix
+from laclean.core.transforms import matrix_from_pose, pose_from_matrix
 
 
 KIND_NAMES = {
@@ -29,18 +37,254 @@ KIND_NAMES = {
 }
 
 
+class OperationPanel(QFrame):
+    """Reusable confirmation surface for one pending tree operation."""
+
+    confirmed = pyqtSignal(str, object)
+    cancelled = pyqtSignal()
+    pose_changed = pyqtSignal(object)
+    crop_redraw_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("operationPanel")
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self._action_id = ""
+        self._payload: dict[str, object] = {}
+        self._pose_editors: list[QDoubleSpinBox] = []
+        self._crop_status: QLabel | None = None
+        self._crop_selected: QLabel | None = None
+        self._crop_redraw: QPushButton | None = None
+        self._crop_mode_group: QButtonGroup | None = None
+        self._form = QVBoxLayout(self)
+        self._form.setContentsMargins(12, 12, 12, 12)
+        self._form.setSpacing(8)
+        self._form.setAlignment(Qt.AlignTop)
+
+        self._title = QLabel("当前操作")
+        self._title.setProperty("section", True)
+        self._target = QLabel("—")
+        self._target.setWordWrap(True)
+        self._body = QVBoxLayout()
+        self._body.setAlignment(Qt.AlignTop)
+        body_host = QWidget()
+        body_host.setObjectName("operationBody")
+        body_host.setAutoFillBackground(True)
+        body_host.setLayout(self._body)
+        self._scroll = QScrollArea()
+        self._scroll.setObjectName("operationScrollArea")
+        self._scroll.setAutoFillBackground(True)
+        self._scroll.viewport().setObjectName("operationViewport")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setViewportMargins(0, 0, 18, 0)
+        self._scroll.setWidget(body_host)
+        self._buttons = QHBoxLayout()
+        self._confirm = QPushButton("确认")
+        self._confirm.setProperty("accent", True)
+        self._cancel = QPushButton("取消")
+        self._buttons.addStretch(1)
+        self._buttons.addWidget(self._cancel)
+        self._buttons.addWidget(self._confirm)
+        self._form.addWidget(self._title)
+        self._form.addWidget(self._target)
+        self._form.addWidget(self._scroll, 1)
+        self._form.addLayout(self._buttons)
+        self._confirm.clicked.connect(self._emit_confirmed)
+        self._cancel.clicked.connect(self.cancelled)
+        self.hide()
+
+    @property
+    def action_id(self) -> str:
+        return self._action_id
+
+    def begin(self, action_id: str, title: str, node: SceneNode | None, **payload) -> None:
+        self._action_id = str(action_id)
+        self._payload = dict(payload)
+        self._pose_editors = []
+        self._crop_status = None
+        self._crop_selected = None
+        self._crop_redraw = None
+        self._crop_mode_group = None
+        self._title.setText(title)
+        self._target.setText(
+            f"目标：{node.name}（{KIND_NAMES.get(node.kind, node.kind.value)}）"
+            if node is not None
+            else "目标：当前项目"
+        )
+        while self._body.count():
+            item = self._body.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if action_id == "rename_node":
+            editor = QLineEdit(str(payload.get("name", node.name if node else "")))
+            editor.setObjectName("operationNameEdit")
+            self._body.addWidget(QLabel("名称"))
+            self._body.addWidget(editor)
+            self._payload["name_editor"] = editor
+        elif action_id in {"set_point_cloud_pose", "set_cad_model_pose"}:
+            hint = QLabel("拖动三维场景中的箭头平移、圆环旋转，也可以直接编辑下方数值。")
+            hint.setWordWrap(True)
+            hint.setMinimumWidth(0)
+            hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self._body.addWidget(hint)
+            try:
+                translation, rotation = pose_from_matrix(node.metadata.get("transform"))
+            except (AttributeError, TypeError, ValueError):
+                translation = (0.0, 0.0, 0.0)
+                rotation = (0.0, 0.0, 0.0)
+            self._add_pose_editors(translation, rotation)
+        elif action_id in {"import_point_cloud", "import_cad", "import_robot"}:
+            self._add_readonly_value("待导入文件", str(payload.get("path", "—")))
+            self._add_readonly_value("格式", str(payload.get("format", "—")))
+        elif action_id == "crop_point_cloud":
+            hint = QLabel("已进入矩形框选模式。按住左键拖动绘制矩形，右键或 Esc 取消框选。")
+            hint.setWordWrap(True)
+            hint.setMinimumWidth(0)
+            hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self._body.addWidget(hint)
+            self._crop_status = QLabel("状态：等待绘制矩形")
+            self._crop_selected = QLabel("选中点数：尚未完成框选")
+            self._body.addWidget(self._crop_status)
+            self._body.addWidget(self._crop_selected)
+            self._body.addWidget(QLabel("裁剪方式"))
+            mode_group = QButtonGroup(self)
+            mode_group.setExclusive(True)
+            keep_box = QCheckBox("保留框内")
+            delete_box = QCheckBox("删除框内")
+            keep_box.setChecked(True)
+            mode_group.addButton(keep_box, 0)
+            mode_group.addButton(delete_box, 1)
+            mode_layout = QHBoxLayout()
+            mode_layout.addWidget(keep_box)
+            mode_layout.addWidget(delete_box)
+            mode_layout.addStretch(1)
+            self._body.addLayout(mode_layout)
+            self._crop_mode_group = mode_group
+            self._crop_redraw = QPushButton("重新绘制")
+            self._crop_redraw.clicked.connect(self.crop_redraw_requested)
+            self._body.addWidget(self._crop_redraw)
+        elif action_id == "process_point_cloud":
+            self._body.addWidget(QLabel("确认后打开点云处理参数面板，取消不执行处理。"))
+        elif action_id == "delete_node":
+            self._body.addWidget(QLabel("确认后将删除该节点及其三维显示，操作不可直接恢复。"))
+        elif action_id == "save_project":
+            self._add_readonly_value("项目", node.name if node is not None else "当前项目")
+            self._add_readonly_value("状态", "存在未保存修改")
+        else:
+            self._body.addWidget(QLabel("该功能当前为预留接口。点击确认后仅显示提示，不修改项目。"))
+        self.show()
+
+    def set_crop_selection(self, selected_count: int, total_count: int) -> None:
+        if self._crop_status is not None:
+            self._crop_status.setText("状态：矩形框选完成，可确认裁剪或重新绘制")
+        if self._crop_selected is not None:
+            self._crop_selected.setText(
+                f"选中点数：{int(selected_count):,} / {int(total_count):,}"
+            )
+
+    def set_crop_status(self, text: str) -> None:
+        if self._crop_status is not None:
+            self._crop_status.setText(f"状态：{text}")
+
+    def reset_crop_selection(self) -> None:
+        if self._crop_status is not None:
+            self._crop_status.setText("状态：等待重新绘制矩形")
+        if self._crop_selected is not None:
+            self._crop_selected.setText("选中点数：尚未完成框选")
+
+    def _add_pose_editors(self, translation, rotation) -> None:
+        self._pose_editors = []
+        for title, axes, values, suffix in (
+            ("世界坐标 XYZ（mm）", ("X", "Y", "Z"), translation, " mm"),
+            ("旋转 Rx/Ry/Rz（°）", ("Rx", "Ry", "Rz"), rotation, "°"),
+        ):
+            group = QGroupBox(title)
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(12, 10, 12, 10)
+            group_layout.setSpacing(7)
+            for axis, value in zip(axes, values):
+                row = QHBoxLayout()
+                row.setSpacing(8)
+                axis_label = QLabel(axis)
+                axis_label.setFixedWidth(30)
+                row.addWidget(axis_label)
+                editor = QDoubleSpinBox()
+                editor.setRange(-1_000_000_000.0, 1_000_000_000.0)
+                editor.setDecimals(3)
+                editor.setSingleStep(1.0)
+                editor.setValue(float(value))
+                editor.setSuffix(suffix)
+                editor.setKeyboardTracking(False)
+                editor.setMinimumWidth(0)
+                editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                editor.valueChanged.connect(self._emit_pose_changed)
+                self._pose_editors.append(editor)
+                row.addWidget(editor, 1)
+                group_layout.addLayout(row)
+            self._body.addWidget(group)
+
+    def set_pose_matrix(self, matrix: object) -> None:
+        if len(self._pose_editors) != 6:
+            return
+        try:
+            translation, rotation = pose_from_matrix(matrix)
+        except (TypeError, ValueError):
+            return
+        for editor, value in zip(self._pose_editors, (*translation, *rotation)):
+            blocked = editor.blockSignals(True)
+            editor.setValue(float(value))
+            editor.blockSignals(blocked)
+
+    def _emit_pose_changed(self, _value: float) -> None:
+        if len(self._pose_editors) != 6:
+            return
+        values = [editor.value() for editor in self._pose_editors]
+        self.pose_changed.emit(matrix_from_pose(values[:3], values[3:]).tolist())
+
+    def _add_readonly_value(self, label: str, value: str) -> None:
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+        value_label = QLabel(value)
+        value_label.setWordWrap(True)
+        row.addWidget(value_label, 1)
+        self._body.addLayout(row)
+
+    def _emit_confirmed(self) -> None:
+        payload = dict(self._payload)
+        editor = payload.pop("name_editor", None)
+        if isinstance(editor, QLineEdit):
+            payload["name"] = editor.text()
+        if self._crop_mode_group is not None:
+            payload["crop_mode"] = (
+                "keep" if self._crop_mode_group.checkedId() == 0 else "delete"
+            )
+        self.confirmed.emit(self._action_id, payload)
+
+    def clear_operation(self) -> None:
+        self._action_id = ""
+        self._payload.clear()
+        self.hide()
+
+
 class PropertiesPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("propertiesPanel")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         scroll = QScrollArea(self)
+        scroll.setObjectName("propertiesScrollArea")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(scroll)
 
         content = QWidget(scroll)
+        content.setObjectName("propertiesContent")
         self._content_layout = QVBoxLayout(content)
         self._content_layout.setContentsMargins(12, 12, 12, 12)
         self._content_layout.setSpacing(12)

@@ -34,7 +34,7 @@ class PointCloudProcessingDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("pointCloudProcessingDialog")
         self.setWindowTitle(f"基本点云处理 — {cloud_name}")
-        self.setMinimumWidth(570)
+        self.setMinimumWidth(0)
         self.setModal(False)
         self._busy = False
         self._has_preview = False
