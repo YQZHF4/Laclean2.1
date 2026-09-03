@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from uuid import UUID
@@ -27,15 +26,9 @@ from PyQt5.QtWidgets import (
 from laclean.core.cad_model import CadModelData
 from laclean.core.point_cloud import PointCloudData
 from laclean.core.error_handling import format_bytes, log_exception
-from laclean.core.point_cloud_editing import (
-    EditCommandHistory,
-    PointCloudEditCommand,
-    PointCloudEditState,
-    RectangleSelection,
-    apply_edit_state,
-    metadata_for_cropped_data,
-)
+from laclean.core.point_cloud_editing import EditCommandHistory, PointCloudEditState, RectangleSelection
 from laclean.core.scene import NodeKind, SceneDocument, SceneNode
+from laclean.application.controller import ApplicationController
 from laclean.services.point_cloud_service import (
     ImportedPointCloud,
     SUPPORTED_POINT_CLOUD_SUFFIXES,
@@ -79,10 +72,7 @@ class MainWindow(QMainWindow):
             | QMainWindow.AllowTabbedDocks
         )
 
-        self.project_service = ProjectService()
-        self.document = SceneDocument.create_default()
-        self.point_clouds: dict[object, PointCloudData] = {}
-        self.cad_models: dict[object, CadModelData] = {}
+        self.application = ApplicationController()
         self._point_cloud_task = None
         self._selected_node: SceneNode | None = None
         self._processing_dialog: PointCloudProcessingDialog | None = None
@@ -90,7 +80,6 @@ class MainWindow(QMainWindow):
         self._processing_original: PointCloudData | None = None
         self._processing_preview: ProcessedPointCloud | None = None
         self._processing_applied = False
-        self._edit_history = EditCommandHistory(limit=20)
         self._crop_node_id: UUID | None = None
         self._crop_before_state: PointCloudEditState | None = None
         self._crop_selection: RectangleSelection | None = None
@@ -107,6 +96,30 @@ class MainWindow(QMainWindow):
         self._update_window_title()
 
         QTimer.singleShot(0, self._select_project_root)
+
+    @property
+    def project_service(self) -> ProjectService:
+        return self.application.project_service
+
+    @property
+    def document(self) -> SceneDocument:
+        return self.application.document
+
+    @document.setter
+    def document(self, value: SceneDocument) -> None:
+        self.application.document = value
+
+    @property
+    def point_clouds(self) -> dict[object, PointCloudData]:
+        return self.application.point_clouds
+
+    @property
+    def cad_models(self) -> dict[object, CadModelData]:
+        return self.application.cad_models
+
+    @property
+    def _edit_history(self) -> EditCommandHistory:
+        return self.application.edit_history
 
     def _create_actions(self) -> None:
         style = self.style()
@@ -407,14 +420,13 @@ class MainWindow(QMainWindow):
         if self._processing_dialog is not None:
             self._processing_dialog.reject()
         self._finish_crop_session(reattach=False)
-        self._edit_history.clear()
         self._update_edit_actions()
         self.viewer.clear_point_clouds()
         self.viewer.clear_cad_models()
         self.point_clouds.clear()
         self.cad_models.clear()
         self._cleanup_scratch_project_directory()
-        self.document = document
+        self.application.replace_document(document)
         self.scene_tree.set_document(document)
         self._select_project_root()
         self._update_window_title()
@@ -537,7 +549,7 @@ class MainWindow(QMainWindow):
     def _handle_tree_action(self, action_id: str, node: SceneNode | None) -> None:
         if action_id == "visibility_changed":
             if node is not None:
-                self.document.modified = True
+                self.application.set_visibility(node, node.visible)
                 self._update_window_title()
                 state = "显示" if node.visible else "隐藏"
                 self._status_message.setText(f"{node.name}：{state}")
@@ -662,36 +674,10 @@ class MainWindow(QMainWindow):
             return
 
         data = preview.data
-        data.asset_path = persisted.asset_path
-        metadata = node.metadata
-        metadata.setdefault("original_asset", metadata.get("asset"))
-        metadata["asset"] = persisted.relative_asset
-        metadata["point_count"] = data.point_count
-        metadata["display_point_count"] = len(data.display_arrays()[0])
-        metadata["has_colors"] = data.has_colors
-        metadata["has_normals"] = data.has_normals
-        metadata["bounds_min"] = data.bounds_min.astype(float).tolist()
-        metadata["bounds_max"] = data.bounds_max.astype(float).tolist()
-        metadata["memory_bytes"] = data.memory_bytes
-        history = metadata.setdefault("processing_history", [])
-        if not isinstance(history, list):
-            history = []
-            metadata["processing_history"] = history
-        history.append(
-            {
-                "applied_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                "asset": persisted.relative_asset,
-                "options": preview.options.to_dict(),
-                "summary": preview.summary.to_dict(),
-            }
-        )
-
-        self.point_clouds[node.node_id] = data
+        self.application.apply_processed_result(node, preview, persisted)
         self._processing_original = data
         self._processing_applied = True
-        self._edit_history.clear()
         self._update_edit_actions()
-        self.document.modified = True
         self._update_window_title()
         self._display_processing_data(node, data)
         if self._selected_node is node:
@@ -885,17 +871,10 @@ class MainWindow(QMainWindow):
         before = self._crop_before_state
         if node is None or before is None:
             return
-        applied_at = datetime.now().astimezone().isoformat(timespec="seconds")
-        after_metadata = metadata_for_cropped_data(
-            node, cropped, persisted.relative_asset, applied_at
+        command, trimmed_commands = self.application.apply_cropped_result(
+            node, before, cropped, persisted
         )
-        after = PointCloudEditState(cropped.data, after_metadata)
-        command_text = (
-            "矩形裁剪（保留框内）" if cropped.mode == "keep" else "矩形裁剪（删除框内）"
-        )
-        command = PointCloudEditCommand(node.node_id, command_text, before, after)
-        self._apply_point_cloud_edit_state(node, after)
-        trimmed_commands = self._edit_history.push(command)
+        command_text = command.text
         self._update_edit_actions()
         self._finish_crop_session()
         memory_note = (
@@ -933,15 +912,16 @@ class MainWindow(QMainWindow):
     def undo_edit(self) -> bool:
         if not self._can_run_edit_history_action():
             return False
-        command = self._edit_history.undo()
+        command = self.application.undo_edit()
         if command is None:
             return False
         node = self.document.find(command.node_id)
         if node is None or node.kind is not NodeKind.POINT_CLOUD:
-            self._edit_history.clear()
+            self.application.edit_history.clear()
             self._update_edit_actions()
             return False
-        self._apply_point_cloud_edit_state(node, command.before)
+        self.application.apply_edit_state(node, command.before)
+        self._display_processing_data(node, command.before.data)
         self._update_edit_actions()
         self._status_message.setText(f"已撤销：{command.text}")
         return True
@@ -949,15 +929,16 @@ class MainWindow(QMainWindow):
     def redo_edit(self) -> bool:
         if not self._can_run_edit_history_action():
             return False
-        command = self._edit_history.redo()
+        command = self.application.redo_edit()
         if command is None:
             return False
         node = self.document.find(command.node_id)
         if node is None or node.kind is not NodeKind.POINT_CLOUD:
-            self._edit_history.clear()
+            self.application.edit_history.clear()
             self._update_edit_actions()
             return False
-        self._apply_point_cloud_edit_state(node, command.after)
+        self.application.apply_edit_state(node, command.after)
+        self._display_processing_data(node, command.after.data)
         self._update_edit_actions()
         self._status_message.setText(f"已重做：{command.text}")
         return True
@@ -975,10 +956,8 @@ class MainWindow(QMainWindow):
     def _apply_point_cloud_edit_state(
         self, node: SceneNode, state: PointCloudEditState
     ) -> None:
-        apply_edit_state(node, state)
-        self.point_clouds[node.node_id] = state.data
+        self.application.apply_edit_state(node, state)
         self._display_processing_data(node, state.data)
-        self.document.modified = True
         self._update_window_title()
         if self._selected_node is node:
             self.properties.set_node(node)
@@ -1028,20 +1007,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_cad_model_imported(self, result: ImportedCadModel) -> None:
-        group = (
-            self._robot_group()
-            if result.node.kind is NodeKind.ROBOT
-            else self._cad_model_group()
-        )
-        if group is None:
+        if not self.application.add_cad_model(result.node, result.data):
             QMessageBox.critical(self, "导入 STEP 失败", "项目缺少目标模型对象组。")
             return
-        if result.node.kind is NodeKind.ROBOT:
-            group.children = [
-                child for child in group.children if not child.metadata.get("placeholder")
-            ]
-        group.add_child(result.node)
-        self.cad_models[result.node.node_id] = result.data
         try:
             self.viewer.display_cad_model(
                 result.data,
@@ -1057,7 +1025,6 @@ class MainWindow(QMainWindow):
                 f"模型已复制并加入项目，但三维显示失败：\n{detail}",
             )
 
-        self.document.modified = True
         self._update_window_title()
         self.scene_tree.rebuild()
         self.scene_tree.select_node(result.node.node_id)
@@ -1100,13 +1067,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_point_cloud_imported(self, result: ImportedPointCloud) -> None:
-        group = self._point_cloud_group()
-        if group is None:
+        if not self.application.add_point_cloud(result.node, result.data):
             QMessageBox.critical(self, "导入点云失败", "项目缺少点云对象组。")
             return
-
-        group.add_child(result.node)
-        self.point_clouds[result.node.node_id] = result.data
         try:
             displayed = self.viewer.display_point_cloud(
                 result.data,
@@ -1123,7 +1086,6 @@ class MainWindow(QMainWindow):
                 f"点云已复制并加入项目，但三维显示失败：\n{detail}",
             )
 
-        self.document.modified = True
         self._update_window_title()
         self.scene_tree.rebuild()
         self.scene_tree.select_node(result.node.node_id)
@@ -1158,7 +1120,7 @@ class MainWindow(QMainWindow):
     def _on_point_clouds_restored(self, loaded: list, errors: list) -> None:
         render_errors = []
         for node, data in loaded:
-            self.point_clouds[node.node_id] = data
+            self.application.register_point_cloud(node, data)
             node.metadata["memory_bytes"] = data.memory_bytes
             try:
                 displayed = self.viewer.display_point_cloud(
@@ -1200,7 +1162,7 @@ class MainWindow(QMainWindow):
     def _on_cad_models_restored(self, loaded: list, errors: list) -> None:
         render_errors = []
         for node, data in loaded:
-            self.cad_models[node.node_id] = data
+            self.application.register_cad_model(node, data)
             try:
                 self.viewer.display_cad_model(
                     data,
@@ -1221,56 +1183,19 @@ class MainWindow(QMainWindow):
         self._status_message.setText(f"已恢复 {len(loaded)} 个 STEP 模型")
 
     def _point_cloud_group(self) -> SceneNode | None:
-        return next(
-            (
-                node
-                for node in self.document.root.children
-                if node.metadata.get("group") == "point_clouds"
-            ),
-            None,
-        )
+        return self.application.point_cloud_group()
 
     def _point_cloud_nodes(self) -> list[SceneNode]:
-        group = self._point_cloud_group()
-        if group is None:
-            return []
-        return [node for node in group.children if node.kind is NodeKind.POINT_CLOUD]
+        return self.application.point_cloud_nodes()
 
     def _cad_model_group(self) -> SceneNode | None:
-        return next(
-            (
-                node
-                for node in self.document.root.children
-                if node.metadata.get("group") == "cad_models"
-            ),
-            None,
-        )
+        return self.application.cad_model_group()
 
     def _robot_group(self) -> SceneNode | None:
-        return next(
-            (
-                node
-                for node in self.document.root.children
-                if node.metadata.get("group") == "robots"
-            ),
-            None,
-        )
+        return self.application.robot_group()
 
     def _cad_model_nodes(self) -> list[SceneNode]:
-        nodes: list[SceneNode] = []
-        cad_group = self._cad_model_group()
-        robot_group = self._robot_group()
-        if cad_group is not None:
-            nodes.extend(
-                node for node in cad_group.children if node.kind is NodeKind.CAD_MODEL
-            )
-        if robot_group is not None:
-            nodes.extend(
-                node
-                for node in robot_group.children
-                if node.kind is NodeKind.ROBOT and not node.metadata.get("placeholder")
-            )
-        return nodes
+        return self.application.cad_model_nodes()
 
     @staticmethod
     def _cad_display_color(node: SceneNode) -> tuple[float, float, float]:
@@ -1309,15 +1234,11 @@ class MainWindow(QMainWindow):
 
     def _on_manipulator_transform_changed(self, node_id: str, matrix: object) -> None:
         try:
-            node = self.document.find(UUID(node_id))
+            node = self.application.update_transform(UUID(node_id), matrix)
         except ValueError:
             return
-        if node is None or node.kind not in {NodeKind.POINT_CLOUD, NodeKind.CAD_MODEL}:
+        if node is None:
             return
-        node.metadata["transform"] = matrix
-        if node.kind is NodeKind.POINT_CLOUD:
-            node.metadata["coordinate_mode"] = self.viewer.manipulator_coordinate_mode
-        self.document.modified = True
         self._update_window_title()
         if self._selected_node is node:
             self.properties.set_node(node)

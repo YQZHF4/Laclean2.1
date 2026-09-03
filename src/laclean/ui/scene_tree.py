@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
 )
 
 from laclean.core.scene import NodeKind, SceneDocument, SceneNode
+from laclean.application.actions import SceneAction
 
 
 NODE_ID_ROLE = Qt.UserRole
@@ -145,7 +146,7 @@ class SceneTreeWidget(QTreeWidget):
             return
         node.visible = item.checkState(0) == Qt.Checked
         item.setText(1, self._status_text(node))
-        self.action_requested.emit("visibility_changed", node)
+        self.action_requested.emit(SceneAction.VISIBILITY_CHANGED, node)
 
     def _open_context_menu(self, position: QPoint) -> None:
         item = self.itemAt(position)
@@ -157,30 +158,30 @@ class SceneTreeWidget(QTreeWidget):
         group = node.metadata.get("group")
 
         if node.kind is NodeKind.POINT_CLOUD:
-            self._add_action(menu, "设置点云位置", "set_point_cloud_pose", node)
+            self._add_action(menu, "设置点云位置", SceneAction.SET_POINT_CLOUD_POSE, node)
             menu.addSeparator()
-            self._add_action(menu, "基本点云处理", "process_point_cloud", node)
-            self._add_action(menu, "手动矩形裁剪", "crop_point_cloud", node)
+            self._add_action(menu, "基本点云处理", SceneAction.PROCESS_POINT_CLOUD, node)
+            self._add_action(menu, "手动矩形裁剪", SceneAction.CROP_POINT_CLOUD, node)
         elif node.kind is NodeKind.CAD_MODEL:
-            self._add_action(menu, "设置数模位置", "set_cad_model_pose", node)
+            self._add_action(menu, "设置数模位置", SceneAction.SET_CAD_MODEL_POSE, node)
         elif node.kind is NodeKind.ROBOT:
-            self._add_action(menu, "正运动学", "forward_kinematics", node)
-            self._add_action(menu, "逆运动学", "inverse_kinematics", node)
+            self._add_action(menu, "正运动学", SceneAction.FORWARD_KINEMATICS, node)
+            self._add_action(menu, "逆运动学", SceneAction.INVERSE_KINEMATICS, node)
             menu.addSeparator()
-            self._add_action(menu, "碰撞检测", "collision_check", node)
+            self._add_action(menu, "碰撞检测", SceneAction.COLLISION_CHECK, node)
         elif group == "point_clouds":
-            self._add_action(menu, "导入点云…", "import_point_cloud", node)
+            self._add_action(menu, "导入点云…", SceneAction.IMPORT_POINT_CLOUD, node)
         elif group == "cad_models":
-            self._add_action(menu, "导入数模…", "import_cad", node)
+            self._add_action(menu, "导入数模…", SceneAction.IMPORT_CAD, node)
         elif group == "robots":
-            self._add_action(menu, "导入机械臂 STEP…", "import_robot", node)
+            self._add_action(menu, "导入机械臂 STEP…", SceneAction.IMPORT_ROBOT, node)
         elif node.kind is NodeKind.PROJECT:
-            self._add_action(menu, "保存项目", "save_project", node)
+            self._add_action(menu, "保存项目", SceneAction.SAVE_PROJECT, node)
 
         if node.kind not in {NodeKind.PROJECT, NodeKind.GROUP}:
             menu.addSeparator()
-            self._add_action(menu, "重命名", "rename_node", node)
-            self._add_action(menu, "删除", "delete_node", node)
+            self._add_action(menu, "重命名", SceneAction.RENAME_NODE, node)
+            self._add_action(menu, "删除", SceneAction.DELETE_NODE, node)
 
         if not menu.isEmpty():
             menu.exec_(self.viewport().mapToGlobal(position))
