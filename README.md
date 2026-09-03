@@ -26,8 +26,7 @@
 
 ```text
 Laclean2/
-├─ 图片/
-├─ 资料/
+├─ 模型/
 ├─ projects/
 ├─ scripts/
 ├─ src/
@@ -42,7 +41,7 @@ Laclean2/
 - `tests/`：自动化测试。
 - `scripts/`：冒烟测试、性能基准和辅助脚本。
 - `projects/`：示例或本地保存的业务项目。
-- `资料/`、`图片/`：示例模型、说明资料和图片资源。
+- `模型/`：示例点云、数模和机械臂模型资源。
 - `main.py`：本地开发启动入口。
 - `pyproject.toml`：项目元数据、依赖声明、打包入口和 pytest 配置。
 
@@ -78,13 +77,13 @@ Laclean2/
   `assets/robots/<节点UUID>/`，项目移动后仍能恢复。
 - 机械臂模型节点继续提供正运动学、逆运动学和碰撞检测预留菜单。
 
-仓库内的 `资料/【机械臂R6-093S】客户模型.stp` 已通过实际验证：9.3 MB、1 个 STEP
+仓库内的 `模型/【机械臂R6-093S】客户模型.stp` 已通过实际验证：9.3 MB、1 个 STEP
 根、55 个实体、4,426 个面，解析和三角化约 3.7 秒，OCC 首次显示约 0.2 秒。
 可独立复测导入、显示、保存和项目重开恢复：
 
 ```powershell
 $env:PYTHONPATH = (Resolve-Path src).Path
-python scripts\smoke_test_step.py "资料\【机械臂R6-093S】客户模型.stp"
+python scripts\smoke_test_step.py "模型\【机械臂R6-093S】客户模型.stp"
 ```
 
 ## 点云操纵器
