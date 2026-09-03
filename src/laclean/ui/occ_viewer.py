@@ -11,6 +11,7 @@ import numpy as np
 from laclean.core.error_handling import log_exception
 from laclean.core.point_cloud import PointCloudData
 from laclean.core.cad_model import CadModelData
+from laclean.core.robot_model import RobotModelData
 from laclean.core.transforms import gp_trsf_to_matrix, matrix_to_gp_trsf
 
 from PyQt5.QtCore import QEvent, QPoint, QRect, Qt, pyqtSignal
@@ -48,6 +49,9 @@ class OccViewerPanel(QWidget):
         self._pending_cad_models: dict[
             str, tuple[CadModelData, bool, tuple[float, float, float], object]
         ] = {}
+        self._robot_objects: dict[str, dict[str, object]] = {}
+        self._robot_link_transforms: dict[str, dict[str, np.ndarray]] = {}
+        self._pending_robot_models: dict[str, tuple[RobotModelData, bool, object]] = {}
         self._manipulator = None
         self._active_manipulator_key: str | None = None
         self._manipulator_target_key: str | None = None
@@ -499,6 +503,12 @@ class OccViewerPanel(QWidget):
                 )
             if pending_cad:
                 self.fit_all()
+            pending_robot = list(self._pending_robot_models.values())
+            self._pending_robot_models.clear()
+            for data, visible, transform in pending_robot:
+                self.display_robot_model(data, visible=visible, transform=transform, fit=False)
+            if pending_robot:
+                self.fit_all()
             self.initialized.emit(True, "三维视图已就绪")
         except Exception as exc:
             detail = log_exception("初始化三维驱动", exc)
@@ -752,6 +762,97 @@ class OccViewerPanel(QWidget):
         if fit and visible:
             self.fit_all()
 
+    def display_robot_model(self, data: RobotModelData, *, visible: bool = True,
+                            transform: object | None = None, fit: bool = True) -> None:
+        """Display one independent OCC presentation for every URDF link."""
+        key = str(data.node_id)
+        transform_value = transform if transform is not None else np.eye(4)
+        if not self.is_ready:
+            self._pending_robot_models[key] = (data, visible, transform_value)
+            return
+        from OCC.Core.AIS import AIS_Shape
+        from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
+
+        self.remove_robot_model(data.node_id, update=False)
+        objects: dict[str, object] = {}
+        link_transforms: dict[str, np.ndarray] = {}
+        for link in data.links:
+            for index, shape in enumerate(data.link_shapes.get(link.name, [])):
+                presentation = AIS_Shape(shape)
+                colors = link.visual_colors or [(0.58, 0.64, 0.72, 1.0)]
+                color = colors[min(index, len(colors) - 1)]
+                presentation.SetColor(Quantity_Color(*color[:3], Quantity_TOC_RGB))
+                link_transform = np.asarray(data.link_transforms.get(link.name, np.eye(4)))
+                combined = np.asarray(transform_value) @ link_transform
+                presentation.SetLocalTransformation(matrix_to_gp_trsf(combined))
+                # The imported geometry is triangulated. Do not draw every
+                # triangle boundary; use a clean shaded presentation instead.
+                presentation.Attributes().SetFaceBoundaryDraw(False)
+                presentation.SetDisplayMode(1)
+                self._display.Context.Display(presentation, False)
+                if not visible:
+                    self._display.Context.Erase(presentation, False)
+                objects[f"{link.name}:{index}"] = presentation
+                link_transforms[f"{link.name}:{index}"] = link_transform
+        self._robot_objects[key] = objects
+        self._robot_link_transforms[key] = link_transforms
+        self._display.Context.UpdateCurrentViewer()
+        if fit and visible:
+            self.fit_all()
+
+    def set_robot_model_visible(self, node_id: UUID, visible: bool) -> None:
+        key = str(node_id)
+        pending = self._pending_robot_models.get(key)
+        if pending is not None:
+            data, _, transform = pending
+            self._pending_robot_models[key] = (data, visible, transform)
+            return
+        if not self.is_ready:
+            return
+        for presentation in self._robot_objects.get(key, {}).values():
+            (self._display.Context.Display if visible else self._display.Context.Erase)(presentation, False)
+        self._display.Context.UpdateCurrentViewer()
+
+    def update_robot_kinematics(self, data: RobotModelData, link_transforms: dict[str, list[list[float]]],
+                                model_transform: object | None = None) -> None:
+        """Apply one FK result immediately, following the OCC robot-node path.
+
+        The joint editor emits a new FK result for every slider change.  OCC
+        keeps the presentation objects alive, so updating their local
+        transformations is sufficient; redisplaying each AIS object would
+        rebuild presentations and makes dragging unnecessarily expensive.
+        """
+        if not self.is_ready:
+            return
+        key = str(data.node_id)
+        root_transform = np.asarray(model_transform if model_transform is not None else np.eye(4))
+        for name, presentation in self._robot_objects.get(key, {}).items():
+            link_name = name.rsplit(":", 1)[0]
+            local = np.asarray(link_transforms.get(link_name, np.eye(4)))
+            self._robot_link_transforms.setdefault(key, {})[name] = local
+            presentation.SetLocalTransformation(matrix_to_gp_trsf(root_transform @ local))
+        self._display.GetView().Redraw()
+
+    def remove_robot_model(self, node_id: UUID, update: bool = True) -> None:
+        key = str(node_id)
+        self._pending_robot_models.pop(key, None)
+        if self._manipulator_target_key == key:
+            self.detach_manipulator()
+        objects = self._robot_objects.pop(key, {})
+        self._robot_link_transforms.pop(key, None)
+        if self.is_ready:
+            for presentation in objects.values():
+                self._display.Context.Remove(presentation, False)
+            if update:
+                self._display.Context.UpdateCurrentViewer()
+
+    def clear_robot_models(self) -> None:
+        for key in list(self._robot_objects):
+            self.remove_robot_model(UUID(key), update=False)
+        self._pending_robot_models.clear()
+        if self.is_ready:
+            self._display.Context.UpdateCurrentViewer()
+
     def set_cad_model_visible(self, node_id: UUID, visible: bool) -> None:
         key = str(node_id)
         pending = self._pending_cad_models.get(key)
@@ -856,11 +957,22 @@ class OccViewerPanel(QWidget):
         key = str(node_id)
         presentation = self._point_cloud_objects.get(key)
         cad_presentation = self._cad_objects.get(key)
-        if not self.is_ready or (presentation is None and cad_presentation is None):
+        robot_presentations = self._robot_objects.get(key)
+        if not self.is_ready or (presentation is None and cad_presentation is None and not robot_presentations):
             return False
-        target = presentation[0] if presentation is not None else cad_presentation
-        target.SetLocalTransformation(matrix_to_gp_trsf(matrix_value))
-        self._display.Context.Redisplay(target, False)
+        if robot_presentations:
+            root_transform = np.asarray(matrix_value)
+            for name, target in robot_presentations.items():
+                link_transform = self._robot_link_transforms.get(key, {}).get(name, np.eye(4))
+                target.SetLocalTransformation(matrix_to_gp_trsf(root_transform @ link_transform))
+            if self._active_manipulator_key == key:
+                self._update_manipulator_position()
+            self._display.GetView().Redraw()
+            return True
+        else:
+            target = presentation[0] if presentation is not None else cad_presentation
+            target.SetLocalTransformation(matrix_to_gp_trsf(matrix_value))
+            self._display.Context.Redisplay(target, False)
         if self._active_manipulator_key == key:
             self._update_manipulator_position()
         self._display.Context.UpdateCurrentViewer()
@@ -870,6 +982,9 @@ class OccViewerPanel(QWidget):
         key = str(node_id)
         point_cloud = self._point_cloud_objects.get(key)
         presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key)
+        if presentation is None and self._robot_objects.get(key):
+            # The root link is the manipulator anchor for the robot's overall pose.
+            presentation = next(iter(self._robot_objects[key].values()))
         if not self.is_ready or presentation is None:
             return False
 

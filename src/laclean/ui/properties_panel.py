@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSlider,
     QSizePolicy,
     QScrollArea,
     QHBoxLayout,
@@ -43,6 +44,7 @@ class OperationPanel(QFrame):
     confirmed = pyqtSignal(str, object)
     cancelled = pyqtSignal()
     pose_changed = pyqtSignal(object)
+    robot_joints_changed = pyqtSignal(object)
     crop_redraw_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
@@ -125,7 +127,7 @@ class OperationPanel(QFrame):
             self._body.addWidget(QLabel("名称"))
             self._body.addWidget(editor)
             self._payload["name_editor"] = editor
-        elif action_id in {"set_point_cloud_pose", "set_cad_model_pose"}:
+        elif action_id in {"set_point_cloud_pose", "set_cad_model_pose", "set_robot_pose"}:
             hint = QLabel("拖动三维场景中的箭头平移、圆环旋转，也可以直接编辑下方数值。")
             hint.setWordWrap(True)
             hint.setMinimumWidth(0)
@@ -137,6 +139,16 @@ class OperationPanel(QFrame):
                 translation = (0.0, 0.0, 0.0)
                 rotation = (0.0, 0.0, 0.0)
             self._add_pose_editors(translation, rotation)
+        elif action_id == "forward_kinematics":
+            robot = payload.get("robot_data")
+            joints = getattr(robot, "joints", [])
+            if not joints:
+                self._body.addWidget(QLabel("该机械臂没有可控制的关节。"))
+            for joint in joints:
+                if joint.joint_type == "fixed":
+                    continue
+                self._add_joint_editor(joint, float(getattr(robot, "joint_positions", {}).get(joint.name, 0.0)))
+            self._body.addStretch(1)
         elif action_id in {"import_point_cloud", "import_cad", "import_robot"}:
             self._add_readonly_value("待导入文件", str(payload.get("path", "—")))
             self._add_readonly_value("格式", str(payload.get("format", "—")))
@@ -226,6 +238,55 @@ class OperationPanel(QFrame):
                 row.addWidget(editor, 1)
                 group_layout.addLayout(row)
             self._body.addWidget(group)
+
+    def _add_joint_editor(self, joint, value: float) -> None:
+        group = QGroupBox(f"{joint.name} · {joint.joint_type}")
+        layout = QVBoxLayout(group)
+        row = QHBoxLayout()
+        editor = QDoubleSpinBox()
+        slider = QSlider(Qt.Horizontal)
+        if joint.joint_type in {"revolute", "continuous"}:
+            lower = -180.0 if joint.lower is None else joint.lower * 180.0 / 3.141592653589793
+            upper = 180.0 if joint.upper is None else joint.upper * 180.0 / 3.141592653589793
+            shown = value * 180.0 / 3.141592653589793
+            suffix = " °"
+        else:
+            lower = -1000.0 if joint.lower is None else joint.lower * 1000.0
+            upper = 1000.0 if joint.upper is None else joint.upper * 1000.0
+            shown = value * 1000.0
+            suffix = " mm"
+        lower, upper = min(lower, upper), max(lower, upper)
+        editor.setRange(lower, upper)
+        editor.setDecimals(3)
+        editor.setSuffix(suffix)
+        editor.setValue(shown)
+        editor.setKeyboardTracking(False)
+        slider.setRange(-100000, 100000)
+        slider.setValue(round((shown - lower) / (upper - lower or 1.0) * 200000 - 100000))
+        row.addWidget(editor, 1)
+        row.addWidget(slider, 2)
+        layout.addLayout(row)
+        self._body.addWidget(group)
+        def emit_editor(new_value):
+            blocked = slider.blockSignals(True)
+            slider.setValue(round((editor.value() - lower) / (upper - lower or 1.0) * 200000 - 100000))
+            slider.blockSignals(blocked)
+            self._emit_robot_joints()
+        def emit_slider(new_value):
+            blocked = editor.blockSignals(True)
+            editor.setValue(lower + (upper - lower) * (new_value + 100000) / 200000)
+            editor.blockSignals(blocked)
+            self._emit_robot_joints()
+        editor.valueChanged.connect(emit_editor)
+        slider.valueChanged.connect(emit_slider)
+        self._payload.setdefault("joint_editors", {})[joint.name] = (editor, joint.joint_type)
+
+    def _emit_robot_joints(self) -> None:
+        values = {}
+        for name, (editor, joint_type) in self._payload.get("joint_editors", {}).items():
+            value = editor.value()
+            values[name] = value * 3.141592653589793 / 180.0 if joint_type in {"revolute", "continuous"} else value / 1000.0
+        self.robot_joints_changed.emit(values)
 
     def set_pose_matrix(self, matrix: object) -> None:
         if len(self._pose_editors) != 6:
@@ -511,12 +572,24 @@ class PropertiesPanel(QWidget):
         self._point_cloud_card.show()
 
     def _update_cad_properties(self, node: SceneNode) -> None:
-        if node.kind not in {NodeKind.CAD_MODEL, NodeKind.ROBOT} or node.metadata.get(
-            "placeholder"
-        ):
+        if node.kind not in {NodeKind.CAD_MODEL, NodeKind.ROBOT} or node.metadata.get("placeholder"):
             self._cad_card.hide()
             return
         metadata = node.metadata
+        if node.kind is NodeKind.ROBOT:
+            self._cad_source.setText(str(metadata.get("source_name", "—")))
+            self._cad_asset.setText(str(metadata.get("asset", "—")))
+            self._cad_format.setText("URDF")
+            self._cad_file_size.setText("—")
+            self._cad_roots.setText(str(metadata.get("link_count", 0)))
+            self._cad_solids.setText(str(metadata.get("joint_count", 0)))
+            self._cad_faces.setText("—")
+            self._cad_size.setText("—")
+            self._cad_bounds.setText("—")
+            self._cad_translation.setText("世界坐标位姿")
+            self._cad_rotation.setText("静态零位")
+            self._cad_card.show()
+            return
         self._cad_source.setText(str(metadata.get("source_name", "—")))
         self._cad_asset.setText(str(metadata.get("asset", "—")))
         self._cad_format.setText(str(metadata.get("format", "STEP")))
@@ -562,7 +635,7 @@ class PropertiesPanel(QWidget):
         if node.kind is NodeKind.ROBOT and node.metadata.get("placeholder"):
             return "正逆解、碰撞检测和机械臂通信接口已经预留。"
         if node.kind is NodeKind.ROBOT:
-            return "机械臂 STEP 已加载；正逆解和碰撞检测接口仍为预留。"
+            return "URDF 机械臂已加载；当前显示初始零位，正逆解和碰撞检测接口仍为预留。"
         if node.kind is NodeKind.CAD_MODEL:
             return "STEP 数模已加载到三维场景。"
         if node.kind is NodeKind.POINT_CLOUD:

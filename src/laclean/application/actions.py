@@ -11,6 +11,7 @@ class SceneAction(StrEnum):
     IMPORT_ROBOT = "import_robot"
     SET_POINT_CLOUD_POSE = "set_point_cloud_pose"
     SET_CAD_MODEL_POSE = "set_cad_model_pose"
+    SET_ROBOT_POSE = "set_robot_pose"
     PROCESS_POINT_CLOUD = "process_point_cloud"
     CROP_POINT_CLOUD = "crop_point_cloud"
     FORWARD_KINEMATICS = "forward_kinematics"

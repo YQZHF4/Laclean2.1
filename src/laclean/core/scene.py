@@ -65,16 +65,6 @@ class SceneDocument:
         root.add_child(SceneNode("坐标系", NodeKind.GROUP, metadata={"group": "frames"}))
         root.add_child(SceneNode("路径", NodeKind.GROUP, metadata={"group": "paths"}))
 
-        # Empty groups are real scene containers. The robot placeholder makes the
-        # reserved robot context menu visible without pretending a model is loaded.
-        robots.add_child(
-            SceneNode(
-                "机械臂接口（预留）",
-                NodeKind.ROBOT,
-                visible=False,
-                metadata={"placeholder": True, "vendor": "凌云光"},
-            )
-        )
         point_clouds.metadata["accepted_formats"] = [
             ".pcd",
             ".ply",
@@ -84,7 +74,7 @@ class SceneDocument:
             ".pts",
         ]
         cad_models.metadata["accepted_formats"] = [".step", ".stp"]
-        robots.metadata["accepted_formats"] = [".step", ".stp"]
+        robots.metadata["accepted_formats"] = [".urdf"]
         return cls(root=root)
 
     def find(self, node_id: UUID) -> SceneNode | None:

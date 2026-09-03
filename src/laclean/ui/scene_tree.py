@@ -165,6 +165,8 @@ class SceneTreeWidget(QTreeWidget):
         elif node.kind is NodeKind.CAD_MODEL:
             self._add_action(menu, "设置数模位置", SceneAction.SET_CAD_MODEL_POSE, node)
         elif node.kind is NodeKind.ROBOT:
+            self._add_action(menu, "设置机械臂位置", SceneAction.SET_ROBOT_POSE, node)
+            menu.addSeparator()
             self._add_action(menu, "正运动学（预留）", SceneAction.FORWARD_KINEMATICS, node)
             self._add_action(menu, "逆运动学（预留）", SceneAction.INVERSE_KINEMATICS, node)
             menu.addSeparator()
@@ -174,7 +176,7 @@ class SceneTreeWidget(QTreeWidget):
         elif group == "cad_models":
             self._add_action(menu, "导入数模…", SceneAction.IMPORT_CAD, node)
         elif group == "robots":
-            self._add_action(menu, "导入机械臂 STEP…", SceneAction.IMPORT_ROBOT, node)
+            self._add_action(menu, "导入机械臂 URDF…", SceneAction.IMPORT_ROBOT, node)
         elif node.kind is NodeKind.PROJECT:
             self._add_action(menu, "保存项目", SceneAction.SAVE_PROJECT, node)
 

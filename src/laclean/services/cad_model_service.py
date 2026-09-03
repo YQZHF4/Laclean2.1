@@ -34,8 +34,8 @@ class CadModelService:
         project_file_path: str | Path,
         node_kind: NodeKind = NodeKind.CAD_MODEL,
     ) -> ImportedCadModel:
-        if node_kind not in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
-            raise CadModelError("STEP 只能导入为数模或机械臂模型。")
+        if node_kind is not NodeKind.CAD_MODEL:
+            raise CadModelError("STEP 只能导入为数模模型；机械臂请使用 URDF。")
         source = Path(source_path).expanduser().resolve()
         if not source.is_file():
             raise CadModelError(f"STEP 文件不存在：\n{source}")
@@ -44,8 +44,7 @@ class CadModelService:
 
         node_id = uuid4()
         project_directory = Path(project_file_path).expanduser().resolve().parent
-        category = "robots" if node_kind is NodeKind.ROBOT else "cad"
-        asset_directory = project_directory / "assets" / category / str(node_id)
+        asset_directory = project_directory / "assets" / "cad" / str(node_id)
         asset_file = asset_directory / source.name
         try:
             ensure_free_disk_space(project_directory, source.stat().st_size)
@@ -70,7 +69,7 @@ class CadModelService:
                 "asset": relative_asset,
                 "source_name": source.name,
                 "format": "STEP",
-                "model_type": "robot" if node_kind is NodeKind.ROBOT else "cad",
+                "model_type": "cad",
                 "file_size": data.file_size,
                 "root_count": data.root_count,
                 "solid_count": data.solid_count,
@@ -88,8 +87,8 @@ class CadModelService:
     def load_project_asset(
         self, node: SceneNode, project_file_path: str | Path
     ) -> CadModelData:
-        if node.kind not in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
-            raise CadModelError(f"节点“{node.name}”不是 CAD 或机械臂模型。")
+        if node.kind is not NodeKind.CAD_MODEL:
+            raise CadModelError(f"节点“{node.name}”不是数模节点。机械臂请使用 URDF。")
         if node.metadata.get("placeholder"):
             raise CadModelError(f"节点“{node.name}”只是预留接口，没有 STEP 资产。")
         raw_asset = node.metadata.get("asset")

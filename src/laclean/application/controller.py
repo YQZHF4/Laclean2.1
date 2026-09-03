@@ -9,6 +9,7 @@ from uuid import UUID
 
 from laclean.core.cad_model import CadModelData
 from laclean.core.point_cloud import PointCloudData
+from laclean.core.robot_model import RobotModelData
 from laclean.core.point_cloud_editing import (
     EditCommandHistory,
     PointCloudEditCommand,
@@ -20,6 +21,7 @@ from laclean.core.scene import NodeKind, SceneDocument, SceneNode
 from laclean.services.cad_model_service import CadModelService
 from laclean.services.point_cloud_service import PointCloudService
 from laclean.services.project_service import ProjectService
+from laclean.services.urdf_robot_service import UrdfRobotService
 
 if TYPE_CHECKING:
     from laclean.services.point_cloud_processing_service import (
@@ -35,15 +37,18 @@ class ApplicationController:
         self.project_service = ProjectService()
         self.point_cloud_service = PointCloudService()
         self.cad_model_service = CadModelService()
+        self.urdf_robot_service = UrdfRobotService()
         self.document = SceneDocument.create_default()
         self.point_clouds: dict[UUID, PointCloudData] = {}
         self.cad_models: dict[UUID, CadModelData] = {}
+        self.robot_models: dict[UUID, RobotModelData] = {}
         self.edit_history = EditCommandHistory(limit=20)
 
     def replace_document(self, document: SceneDocument) -> None:
         self.document = document
         self.point_clouds.clear()
         self.cad_models.clear()
+        self.robot_models.clear()
         self.edit_history.clear()
 
     def find_node(self, node_id: UUID) -> SceneNode | None:
@@ -63,8 +68,10 @@ class ApplicationController:
         node.name = cleaned
         if node.kind is NodeKind.POINT_CLOUD and node.node_id in self.point_clouds:
             self.point_clouds[node.node_id].name = cleaned
-        if node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT} and node.node_id in self.cad_models:
+        if node.kind is NodeKind.CAD_MODEL and node.node_id in self.cad_models:
             self.cad_models[node.node_id].name = cleaned
+        if node.kind is NodeKind.ROBOT and node.node_id in self.robot_models:
+            self.robot_models[node.node_id].name = cleaned
         self.document.modified = True
         return True
 
@@ -82,12 +89,13 @@ class ApplicationController:
             return False
         self.point_clouds.pop(node.node_id, None)
         self.cad_models.pop(node.node_id, None)
+        self.robot_models.pop(node.node_id, None)
         self.document.modified = True
         return True
 
     def update_transform(self, node_id: UUID, matrix: object) -> SceneNode | None:
         node = self.find_node(node_id)
-        if node is None or node.kind not in {NodeKind.POINT_CLOUD, NodeKind.CAD_MODEL}:
+        if node is None or node.kind not in {NodeKind.POINT_CLOUD, NodeKind.CAD_MODEL, NodeKind.ROBOT}:
             return None
         node.metadata["transform"] = deepcopy(matrix)
         if node.kind is NodeKind.POINT_CLOUD:
@@ -100,6 +108,9 @@ class ApplicationController:
 
     def register_cad_model(self, node: SceneNode, data: CadModelData) -> None:
         self.cad_models[node.node_id] = data
+
+    def register_robot_model(self, node: SceneNode, data: RobotModelData) -> None:
+        self.robot_models[node.node_id] = data
 
     def add_point_cloud(self, node: SceneNode, data: PointCloudData) -> bool:
         group = self.point_cloud_group()
@@ -114,12 +125,11 @@ class ApplicationController:
         group = self.robot_group() if node.kind is NodeKind.ROBOT else self.cad_model_group()
         if group is None or node.kind not in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
             return False
-        if node.kind is NodeKind.ROBOT:
-            group.children = [
-                child for child in group.children if not child.metadata.get("placeholder")
-            ]
         group.add_child(node)
-        self.register_cad_model(node, data)
+        if node.kind is NodeKind.ROBOT:
+            self.register_robot_model(node, data)
+        else:
+            self.register_cad_model(node, data)
         self.document.modified = True
         return True
 
@@ -210,16 +220,16 @@ class ApplicationController:
     def cad_model_nodes(self) -> list[SceneNode]:
         nodes: list[SceneNode] = []
         cad_group = self.cad_model_group()
-        robot_group = self.robot_group()
         if cad_group is not None:
             nodes.extend(node for node in cad_group.children if node.kind is NodeKind.CAD_MODEL)
-        if robot_group is not None:
-            nodes.extend(
-                node
-                for node in robot_group.children
-                if node.kind is NodeKind.ROBOT and not node.metadata.get("placeholder")
-            )
         return nodes
+
+    def robot_model_nodes(self) -> list[SceneNode]:
+        group = self.robot_group()
+        return [] if group is None else [
+            node for node in group.children
+            if node.kind is NodeKind.ROBOT and not node.metadata.get("placeholder")
+        ]
 
     def _group_by_name(self, group_name: str) -> SceneNode | None:
         return next(

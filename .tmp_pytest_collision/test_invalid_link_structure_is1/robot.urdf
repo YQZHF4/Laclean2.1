@@ -1,0 +1,1 @@
+<robot name="demo"><link name="a"/><joint name="j" type="fixed"><parent link="x"/><child link="a"/></joint></robot>

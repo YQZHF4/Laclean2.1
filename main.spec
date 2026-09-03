@@ -61,10 +61,14 @@ hiddenimports = []
 hiddenimports += collect_submodules("laclean")
 hiddenimports += collect_submodules("OCC")
 hiddenimports += collect_submodules("pcl")
+hiddenimports += collect_submodules("trimesh")
+hiddenimports += collect_submodules("collada")
 
 # Package metadata/data and extension modules discovered by PyInstaller hooks.
 datas += collect_data_files("OCC")
 datas += collect_data_files("PyQt5")
+datas += collect_data_files("trimesh")
+binaries += collect_dynamic_libs("trimesh")
 binaries += collect_dynamic_libs("OCC")
 binaries += collect_dynamic_libs("pcl")
 binaries += collect_dynamic_libs("PyQt5")

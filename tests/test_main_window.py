@@ -9,12 +9,12 @@ os.environ.setdefault("LACLEAN_DISABLE_OCC", "1")
 
 from laclean.app import create_application
 from laclean.core.point_cloud import PointCloudData
-from laclean.core.cad_model import CadModelData
+from laclean.core.robot_model import RobotModelData
 from laclean.core.point_cloud_editing import PointCloudEditState, RectangleSelection
 from laclean.core.scene import NodeKind, SceneNode
 from laclean.core.transforms import matrix_from_pose, pose_from_matrix
 from laclean.ui.main_window import MainWindow
-from laclean.services.cad_model_service import ImportedCadModel
+from laclean.services.urdf_robot_service import ImportedRobotModel
 
 
 def _wait_for_point_cloud_task(app, window: MainWindow) -> None:
@@ -231,7 +231,7 @@ def test_rectangle_crop_can_be_undone_redone_and_saved(tmp_path) -> None:
     app.processEvents()
 
 
-def test_imported_robot_replaces_placeholder_and_is_queued_for_occ(tmp_path) -> None:
+def test_imported_urdf_robot_is_queued_for_occ(tmp_path) -> None:
     app = create_application(["robot-import-window-test"])
     window = MainWindow()
     document = window.project_service.create_project("机械臂界面", tmp_path)
@@ -240,43 +240,29 @@ def test_imported_robot_replaces_placeholder_and_is_queued_for_occ(tmp_path) -> 
         "R6-093S",
         NodeKind.ROBOT,
         metadata={
-            "asset": "assets/robots/id/robot.stp",
-            "source_name": "robot.stp",
-            "format": "STEP",
-            "file_size": 100,
-            "root_count": 1,
-            "solid_count": 55,
-            "face_count": 4426,
-            "bounds_min": [-1, 0, -1],
-            "bounds_max": [1, 10, 1],
-            "display_color": [0.72, 0.76, 0.82],
+            "asset": "assets/robots/id/robot.urdf",
+            "source_name": "robot.urdf",
+            "format": "URDF",
+            "link_count": 2,
+            "joint_count": 1,
         },
     )
-    data = CadModelData(
+    data = RobotModelData(
         node_id=node.node_id,
         name=node.name,
-        asset_path=Path("robot.stp"),
-        shape=object(),
-        file_size=100,
-        root_count=1,
-        solid_count=55,
-        face_count=4426,
-        mesh_deflection=0.1,
-        bounds_min=(-1, 0, -1),
-        bounds_max=(1, 10, 1),
+        urdf_path=Path("robot.urdf"), links=[], joints=[], link_transforms={}, link_shapes={},
     )
 
-    window._on_cad_model_imported(ImportedCadModel(node, data))
+    window._on_robot_imported(ImportedRobotModel(node, data))
 
     robot_group = window._robot_group()
     assert robot_group is not None
     assert robot_group.children == [node]
-    assert window.cad_models[node.node_id] is data
-    assert str(node.node_id) in window.viewer._pending_cad_models
-    assert window.properties._cad_solids.text() == "55"
+    assert window.robot_models[node.node_id] is data
+    assert str(node.node_id) in window.viewer._pending_robot_models
     assert window._save_document(window.document.file_path) is True
 
     loaded = window.project_service.load_project(window.document.file_path).document
-    assert loaded.find(node.node_id).metadata["face_count"] == 4426
+    assert loaded.find(node.node_id).metadata["format"] == "URDF"
     window.close()
     app.processEvents()

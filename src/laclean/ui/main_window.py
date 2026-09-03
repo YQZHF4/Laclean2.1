@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
 )
 
 from laclean.core.cad_model import CadModelData
+from laclean.core.robot_model import RobotModelData
 from laclean.core.point_cloud import PointCloudData
 from laclean.core.error_handling import format_bytes, log_exception
 from laclean.core.point_cloud_editing import EditCommandHistory, PointCloudEditState, RectangleSelection
@@ -41,6 +42,7 @@ from laclean.services.cad_model_service import (
     ImportedCadModel,
     SUPPORTED_CAD_SUFFIXES,
 )
+from laclean.services.urdf_robot_service import ImportedRobotModel
 from laclean.services.point_cloud_processing_service import (
     PersistedPointCloud,
     ProcessedPointCloud,
@@ -62,6 +64,7 @@ from laclean.workers.point_cloud_tasks import (
     PointCloudRectangleSelectionThread,
     PointCloudRestoreThread,
 )
+from laclean.workers.robot_tasks import UrdfRobotImportThread, UrdfRobotRestoreThread
 
 
 class ProcessingScrollArea(QScrollArea):
@@ -108,6 +111,7 @@ class MainWindow(QMainWindow):
         self._operation_node: SceneNode | None = None
         self._pending_pose: tuple[UUID, object] | None = None
         self._pending_pose_matrix: object | None = None
+        self._pending_robot_kinematics: tuple[UUID, dict[str, float], dict[str, list[list[float]]]] | None = None
         self._processing_scroll_area: QScrollArea | None = None
 
         self._create_actions()
@@ -142,6 +146,10 @@ class MainWindow(QMainWindow):
         return self.application.cad_models
 
     @property
+    def robot_models(self) -> dict[object, RobotModelData]:
+        return self.application.robot_models
+
+    @property
     def _edit_history(self) -> EditCommandHistory:
         return self.application.edit_history
 
@@ -156,7 +164,7 @@ class MainWindow(QMainWindow):
             "camera_connection": ("相机通讯", QStyle.SP_DriveNetIcon, ""),
             "import_point_cloud": ("导入点云", QStyle.SP_FileDialogNewFolder, "Ctrl+I"),
             "import_cad": ("导入数模", QStyle.SP_FileIcon, ""),
-            "import_robot": ("导入机械臂 STEP", QStyle.SP_ComputerIcon, ""),
+            "import_robot": ("导入机械臂 URDF", QStyle.SP_ComputerIcon, ""),
             "path_parameters": ("路径参数", QStyle.SP_FileDialogDetailedView, ""),
             "generate_path": ("路径生成", QStyle.SP_ArrowForward, ""),
             "robot_connection": ("机械臂通讯", QStyle.SP_ComputerIcon, ""),
@@ -205,7 +213,7 @@ class MainWindow(QMainWindow):
             lambda checked=False: self.import_cad_model(NodeKind.CAD_MODEL)
         )
         self.actions["import_robot"].triggered.connect(
-            lambda checked=False: self.import_cad_model(NodeKind.ROBOT)
+            lambda checked=False: self.import_robot_urdf()
         )
         self.actions["undo"].triggered.connect(lambda checked=False: self.undo_edit())
         self.actions["redo"].triggered.connect(lambda checked=False: self.redo_edit())
@@ -345,6 +353,7 @@ class MainWindow(QMainWindow):
         self.operation_panel.confirmed.connect(self._on_operation_confirmed)
         self.operation_panel.cancelled.connect(self._on_operation_cancelled)
         self.operation_panel.pose_changed.connect(self._on_operation_pose_changed)
+        self.operation_panel.robot_joints_changed.connect(self._on_robot_joints_changed)
         self.operation_panel.crop_redraw_requested.connect(self._on_crop_redraw_requested)
 
     def new_project(self) -> bool:
@@ -452,8 +461,10 @@ class MainWindow(QMainWindow):
         self._update_edit_actions()
         self.viewer.clear_point_clouds()
         self.viewer.clear_cad_models()
+        self.viewer.clear_robot_models()
         self.point_clouds.clear()
         self.cad_models.clear()
+        self.robot_models.clear()
         self._cleanup_scratch_project_directory()
         self.application.replace_document(document)
         self.scene_tree.set_document(document)
@@ -496,6 +507,13 @@ class MainWindow(QMainWindow):
             except ValueError:
                 continue
             data.asset_path = project_directory / relative
+        for data in self.robot_models.values():
+            candidate = Path(data.urdf_path)
+            try:
+                relative = candidate.resolve().relative_to(scratch_assets.parent.resolve())
+            except ValueError:
+                continue
+            data.urdf_path = project_directory / relative
 
     def _cleanup_scratch_project_directory(self) -> None:
         if self._scratch_project_directory is not None:
@@ -565,11 +583,12 @@ class MainWindow(QMainWindow):
             and not node.metadata.get("placeholder")
         ):
             self.viewer.detach_manipulator()
-            solids = int(node.metadata.get("solid_count", 0))
-            faces = int(node.metadata.get("face_count", 0))
-            self._status_message.setText(
-                f"{node.name} · {solids:,} 实体 · {faces:,} 面"
-            )
+            if node.kind is NodeKind.ROBOT:
+                self._status_message.setText(f"{node.name} · {node.metadata.get('link_count', 0)} 个 link · {node.metadata.get('joint_count', 0)} 个 joint")
+            else:
+                solids = int(node.metadata.get("solid_count", 0))
+                faces = int(node.metadata.get("face_count", 0))
+                self._status_message.setText(f"{node.name} · {solids:,} 实体 · {faces:,} 面")
         else:
             self.viewer.detach_manipulator()
 
@@ -586,8 +605,10 @@ class MainWindow(QMainWindow):
                 self._status_message.setText(f"{node.name}：{state}")
                 if node.kind is NodeKind.POINT_CLOUD:
                     self.viewer.set_point_cloud_visible(node.node_id, node.visible)
-                elif node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
+                elif node.kind is NodeKind.CAD_MODEL:
                     self.viewer.set_cad_model_visible(node.node_id, node.visible)
+                elif node.kind is NodeKind.ROBOT:
+                    self.viewer.set_robot_model_visible(node.node_id, node.visible)
             return
         if action_id in {
             "import_point_cloud",
@@ -599,7 +620,7 @@ class MainWindow(QMainWindow):
             elif action_id == "import_cad":
                 self.import_cad_model(NodeKind.CAD_MODEL)
             else:
-                self.import_cad_model(NodeKind.ROBOT)
+                self.import_robot_urdf()
             return
         if action_id == "rename_node" and node is not None:
             self._rename_node_dialog(node)
@@ -610,6 +631,7 @@ class MainWindow(QMainWindow):
         if action_id in {
             "set_point_cloud_pose",
             "set_cad_model_pose",
+            "set_robot_pose",
             "process_point_cloud",
             "crop_point_cloud",
             "save_project",
@@ -619,7 +641,7 @@ class MainWindow(QMainWindow):
         }:
             self._begin_tree_operation(action_id, node)
             return
-        if action_id in {"set_point_cloud_pose", "set_cad_model_pose"} and node is not None:
+        if action_id in {"set_point_cloud_pose", "set_cad_model_pose", "set_robot_pose"} and node is not None:
             self.scene_tree.select_node(node.node_id)
             self.viewer.attach_model_manipulator(node.node_id)
             self._status_message.setText("拖动三轴箭头平移，拖动圆环旋转")
@@ -663,8 +685,10 @@ class MainWindow(QMainWindow):
         self.viewer.detach_manipulator()
         if node.kind is NodeKind.POINT_CLOUD:
             self.viewer.remove_point_cloud(node.node_id)
-        elif node.kind in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
+        elif node.kind is NodeKind.CAD_MODEL:
             self.viewer.remove_cad_model(node.node_id)
+        elif node.kind is NodeKind.ROBOT:
+            self.viewer.remove_robot_model(node.node_id)
         if self.application.delete_node(node):
             self.scene_tree.rebuild()
             self._update_window_title()
@@ -683,9 +707,17 @@ class MainWindow(QMainWindow):
             self._begin_processing_panel(node)
             return
         payload: dict[str, object] = {}
+        if action_id == "forward_kinematics" and node is not None:
+            payload["robot_data"] = self.robot_models.get(node.node_id)
+            data = self.robot_models.get(node.node_id)
+            if data is not None:
+                self._pending_robot_kinematics = (
+                    node.node_id, deepcopy(data.joint_positions), deepcopy(data.link_transforms)
+                )
         title = {
             "set_point_cloud_pose": "设置点云位置",
             "set_cad_model_pose": "设置数模位置",
+            "set_robot_pose": "设置机械臂位置",
             "process_point_cloud": "基本点云处理",
             "crop_point_cloud": "手动矩形裁剪",
             "rename_node": "重命名节点",
@@ -697,7 +729,7 @@ class MainWindow(QMainWindow):
         }[action_id]
         if action_id == "rename_node" and node is not None:
             payload["name"] = node.name
-        if action_id in {"set_point_cloud_pose", "set_cad_model_pose"} and node is not None:
+        if action_id in {"set_point_cloud_pose", "set_cad_model_pose", "set_robot_pose"} and node is not None:
             self._pending_pose = (
                 node.node_id,
                 deepcopy(node.metadata.get("transform")),
@@ -755,7 +787,7 @@ class MainWindow(QMainWindow):
                 self._clear_operation()
                 return
             return
-        elif action_id in {"set_point_cloud_pose", "set_cad_model_pose"} and node is not None:
+        elif action_id in {"set_point_cloud_pose", "set_cad_model_pose", "set_robot_pose"} and node is not None:
             if self._pending_pose is not None and self._pending_pose[0] == node.node_id:
                 matrix = self._pending_pose_matrix
                 if matrix is not None:
@@ -763,6 +795,19 @@ class MainWindow(QMainWindow):
             self.viewer.detach_manipulator()
             self._pending_pose = None
             self._pending_pose_matrix = None
+        elif action_id == "forward_kinematics" and node is not None:
+            data = self.robot_models.get(node.node_id)
+            positions = values.get("joint_positions")
+            if data is not None and isinstance(positions, dict):
+                from laclean.services.urdf_robot_service import UrdfRobotService
+                data.joint_positions = {str(name): float(value) for name, value in positions.items()}
+                transforms = UrdfRobotService.forward_kinematics(data, data.joint_positions)
+                data.link_transforms = transforms
+                node.metadata["joint_positions"] = dict(data.joint_positions)
+                node.metadata["link_transforms"] = transforms
+                self.viewer.update_robot_kinematics(data, transforms, node.metadata.get("transform"))
+                self.application.document.modified = True
+            self._pending_robot_kinematics = None
         elif action_id == "process_point_cloud" and node is not None:
             self._clear_operation()
             self.open_point_cloud_processing(node)
@@ -778,6 +823,18 @@ class MainWindow(QMainWindow):
             self._reserved_action(action_id)
         self._clear_operation()
         self._update_window_title()
+
+    def _on_robot_joints_changed(self, positions: object) -> None:
+        node = self._operation_node
+        if node is None or node.kind is not NodeKind.ROBOT or not isinstance(positions, dict):
+            return
+        data = self.robot_models.get(node.node_id)
+        if data is None:
+            return
+        from laclean.services.urdf_robot_service import UrdfRobotService
+        transforms = UrdfRobotService.forward_kinematics(data, positions)
+        self.viewer.update_robot_kinematics(data, transforms, node.metadata.get("transform"))
+        self.operation_panel._payload["joint_positions"] = dict(positions)
 
     def _on_operation_cancelled(self) -> None:
         if self._crop_node_id is not None:
@@ -813,8 +870,20 @@ class MainWindow(QMainWindow):
                         transform=transform,
                         fit=False,
                     )
+                elif not restored and node.kind is NodeKind.ROBOT and node_id in self.robot_models:
+                    self.viewer.display_robot_model(
+                        self.robot_models[node_id], visible=node.visible,
+                        transform=transform, fit=False,
+                    )
             self._pending_pose = None
-        self._pending_pose_matrix = None
+            self._pending_pose_matrix = None
+        if self._pending_robot_kinematics is not None:
+            node_id, positions, transforms = self._pending_robot_kinematics
+            node = self.document.find(node_id)
+            data = self.robot_models.get(node_id)
+            if node is not None and data is not None:
+                self.viewer.update_robot_kinematics(data, transforms, node.metadata.get("transform"))
+            self._pending_robot_kinematics = None
         self._clear_operation()
 
     def _on_operation_pose_changed(self, matrix: object) -> None:
@@ -1227,13 +1296,13 @@ class MainWindow(QMainWindow):
         self.actions["redo"].setText(f"重做 {redo_text}" if redo_text else "重做")
 
     def import_cad_model(self, node_kind: NodeKind = NodeKind.CAD_MODEL) -> bool:
-        if node_kind not in {NodeKind.CAD_MODEL, NodeKind.ROBOT}:
+        if node_kind is not NodeKind.CAD_MODEL:
             return False
         if self._point_cloud_task is not None and self._point_cloud_task.isRunning():
             QMessageBox.information(self, "后台任务", "已有导入或处理任务正在执行，请稍候。")
             return False
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_CAD_SUFFIXES))
-        title = "导入机械臂 STEP" if node_kind is NodeKind.ROBOT else "导入 STEP 数模"
+        title = "导入 STEP 数模"
         start_directory = (
             str(Path(self.document.file_path).parent)
             if self.document.file_path
@@ -1258,6 +1327,44 @@ class MainWindow(QMainWindow):
         self._begin_point_cloud_task(f"正在解析 STEP：{Path(source_path).name}")
         task.start()
         return True
+
+    def import_robot_urdf(self) -> bool:
+        if self._point_cloud_task is not None and self._point_cloud_task.isRunning():
+            QMessageBox.information(self, "后台任务", "已有导入或处理任务正在执行，请稍候。")
+            return False
+        start_directory = str(Path(self.document.file_path).parent) if self.document.file_path else str(Path.cwd())
+        source_path, _ = QFileDialog.getOpenFileName(
+            self, "导入机械臂 URDF", start_directory,
+            "URDF 文件 (*.urdf);;所有文件 (*)",
+        )
+        if not source_path:
+            return False
+        task = UrdfRobotImportThread(source_path, self._asset_project_file_path(), self)
+        task.succeeded.connect(self._on_robot_imported)
+        task.failed.connect(self._on_robot_task_failed)
+        task.finished.connect(self._finish_point_cloud_task)
+        self._point_cloud_task = task
+        self._begin_point_cloud_task(f"正在解析机械臂 URDF：{Path(source_path).name}")
+        task.start()
+        return True
+
+    def _on_robot_imported(self, result: ImportedRobotModel) -> None:
+        if not self.application.add_cad_model(result.node, result.data):
+            QMessageBox.critical(self, "导入 URDF 失败", "项目缺少机械臂对象组。")
+            return
+        try:
+            self.viewer.display_robot_model(result.data, visible=result.node.visible,
+                                            transform=result.node.metadata.get("transform"))
+        except Exception as exc:
+            QMessageBox.warning(self, "URDF 显示失败", f"机械臂已加入项目，但三维显示失败：\n{log_exception('显示 URDF', exc)}")
+        self._update_window_title()
+        self.scene_tree.rebuild()
+        self.scene_tree.select_node(result.node.node_id)
+        self._status_message.setText(f"已导入机械臂 {result.node.name} · {result.data.link_count} 个 link · {result.data.joint_count} 个 joint")
+
+    def _on_robot_task_failed(self, message: str) -> None:
+        self._status_message.setText("机械臂 URDF 导入失败")
+        QMessageBox.critical(self, "导入机械臂 URDF 失败", message)
 
     def _on_cad_model_imported(self, result: ImportedCadModel) -> None:
         if not self.application.add_cad_model(result.node, result.data):
@@ -1404,6 +1511,7 @@ class MainWindow(QMainWindow):
             return
         nodes = self._cad_model_nodes()
         if not nodes:
+            QTimer.singleShot(0, self._restore_project_robots)
             return
         task = CadModelRestoreThread(nodes, self.document.file_path, self)
         task.succeeded.connect(self._on_cad_models_restored)
@@ -1434,6 +1542,36 @@ class MainWindow(QMainWindow):
         if all_errors:
             QMessageBox.warning(self, "部分 STEP 模型未能恢复", "\n\n".join(all_errors))
         self._status_message.setText(f"已恢复 {len(loaded)} 个 STEP 模型")
+        QTimer.singleShot(0, self._restore_project_robots)
+
+    def _restore_project_robots(self) -> None:
+        if self.document.file_path is None or self._point_cloud_task is not None:
+            return
+        nodes = self.application.robot_model_nodes()
+        if not nodes:
+            return
+        task = UrdfRobotRestoreThread(nodes, self.document.file_path, self)
+        task.succeeded.connect(self._on_robot_models_restored)
+        task.finished.connect(self._finish_point_cloud_task)
+        self._point_cloud_task = task
+        self._begin_point_cloud_task(f"正在恢复 URDF 机械臂（{len(nodes)}）")
+        task.start()
+
+    def _on_robot_models_restored(self, loaded: list, errors: list) -> None:
+        render_errors = []
+        for node, data in loaded:
+            self.application.register_robot_model(node, data)
+            try:
+                self.viewer.display_robot_model(data, visible=node.visible,
+                                                transform=node.metadata.get("transform"), fit=False)
+            except Exception as exc:
+                render_errors.append(f"{node.name}：{log_exception('恢复 URDF 显示', exc)}")
+        if loaded:
+            self.viewer.fit_all()
+        all_errors = [*errors, *render_errors]
+        if all_errors:
+            QMessageBox.warning(self, "部分机械臂未能恢复", "\n\n".join(all_errors))
+        self._status_message.setText(f"已恢复 {len(loaded)} 个 URDF 机械臂")
 
     def _point_cloud_group(self) -> SceneNode | None:
         return self.application.point_cloud_group()
@@ -1449,6 +1587,9 @@ class MainWindow(QMainWindow):
 
     def _cad_model_nodes(self) -> list[SceneNode]:
         return self.application.cad_model_nodes()
+
+    def _robot_model_nodes(self) -> list[SceneNode]:
+        return self.application.robot_model_nodes()
 
     @staticmethod
     def _cad_display_color(node: SceneNode) -> tuple[float, float, float]:

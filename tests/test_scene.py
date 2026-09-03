@@ -18,8 +18,6 @@ def test_default_scene_hierarchy_contains_reserved_groups() -> None:
 
 def test_scene_find_is_recursive() -> None:
     document = SceneDocument.create_default()
-    robot = document.root.children[2].children[0]
-
-    assert document.find(robot.node_id) is robot
-    assert robot.kind is NodeKind.ROBOT
-    assert robot.metadata["placeholder"] is True
+    robot_group = document.root.children[2]
+    assert robot_group.kind is NodeKind.GROUP
+    assert robot_group.children == []

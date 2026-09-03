@@ -1,0 +1,6 @@
+<robot name="demo">
+      <link name="base">
+        <visual><geometry><mesh filename="part.stl" scale="2 3 4"/></geometry></visual>
+        <visual><geometry><mesh filename="other.stl" scale="0.1 0.2 0.3"/></geometry></visual>
+      </link>
+    </robot>

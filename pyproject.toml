@@ -12,6 +12,8 @@ dependencies = [
     "PyQt5>=5.15,<6",
     "numpy>=2.2,<3",
     "python-pcl",
+    "trimesh>=4,<5",
+    "pycollada>=0.7,<1",
 ]
 
 [project.scripts]
