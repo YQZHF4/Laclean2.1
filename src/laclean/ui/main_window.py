@@ -164,7 +164,7 @@ class MainWindow(QMainWindow):
             "camera_connection": ("相机通讯", QStyle.SP_DriveNetIcon, ""),
             "import_point_cloud": ("导入点云", QStyle.SP_FileDialogNewFolder, "Ctrl+I"),
             "import_cad": ("导入数模", QStyle.SP_FileIcon, ""),
-            "import_robot": ("导入机械臂 URDF", QStyle.SP_ComputerIcon, ""),
+            "import_robot": ("导入机械臂", QStyle.SP_ComputerIcon, ""),
             "path_parameters": ("路径参数", QStyle.SP_FileDialogDetailedView, ""),
             "generate_path": ("路径生成", QStyle.SP_ArrowForward, ""),
             "robot_connection": ("机械臂通讯", QStyle.SP_ComputerIcon, ""),
@@ -898,6 +898,7 @@ class MainWindow(QMainWindow):
         self._operation_node = None
         self.operation_panel.clear_operation()
         self.properties_dock.setWidget(self.properties)
+        self.viewer.refresh()
 
     def open_point_cloud_processing(self, node: SceneNode) -> bool:
         if node.kind is not NodeKind.POINT_CLOUD:

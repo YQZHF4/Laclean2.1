@@ -51,6 +51,7 @@ class OccViewerPanel(QWidget):
         ] = {}
         self._robot_objects: dict[str, dict[str, object]] = {}
         self._robot_link_transforms: dict[str, dict[str, np.ndarray]] = {}
+        self._robot_anchor_names: dict[str, str] = {}
         self._pending_robot_models: dict[str, tuple[RobotModelData, bool, object]] = {}
         self._manipulator = None
         self._active_manipulator_key: str | None = None
@@ -142,6 +143,7 @@ class OccViewerPanel(QWidget):
             from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
 
             class TransformAwareViewer(qtViewer3dWithManipulator):
+                manipulator_moved = pyqtSignal()
                 manipulator_released = pyqtSignal()
                 crop_rectangle_completed = pyqtSignal(object)
                 crop_interaction_cancelled = pyqtSignal()
@@ -346,6 +348,7 @@ class OccViewerPanel(QWidget):
                             )
                             inner_self.manip_moved = True
                             inner_self._display.View.Redraw()
+                            inner_self.manipulator_moved.emit()
                         else:
                             inner_self.unsetCursor()
                             inner_self._display.Rotation(pos.x(), pos.y())
@@ -449,6 +452,7 @@ class OccViewerPanel(QWidget):
                     super(TransformAwareViewer, inner_self).keyPressEvent(event)
 
             self._viewer = TransformAwareViewer(self)
+            self._viewer.manipulator_moved.connect(self._on_manipulator_moved)
             self._viewer.manipulator_released.connect(self._on_manipulator_released)
             self._viewer.crop_rectangle_completed.connect(
                 self._on_crop_rectangle_completed
@@ -594,6 +598,13 @@ class OccViewerPanel(QWidget):
     def fit_all(self) -> None:
         self._call_display(lambda display: display.FitAll())
 
+    def refresh(self) -> None:
+        """Flush OCC presentation changes immediately to the embedded view."""
+        if not self.is_ready:
+            return
+        self._display.Context.UpdateCurrentViewer()
+        self._display.GetView().Redraw()
+
     @property
     def is_rectangle_crop_active(self) -> bool:
         return self._crop_active
@@ -617,6 +628,7 @@ class OccViewerPanel(QWidget):
         self._cancel_crop_button.hide()
         if self._viewer is not None:
             self._viewer.set_crop_mode(False, clear_rectangle=clear_rectangle)
+        self.refresh()
         if was_active and emit_signal:
             self.crop_cancelled.emit()
 
@@ -796,6 +808,10 @@ class OccViewerPanel(QWidget):
                 link_transforms[f"{link.name}:{index}"] = link_transform
         self._robot_objects[key] = objects
         self._robot_link_transforms[key] = link_transforms
+        if data.root_link is not None and f"{data.root_link}:0" in objects:
+            self._robot_anchor_names[key] = f"{data.root_link}:0"
+        elif objects:
+            self._robot_anchor_names[key] = next(iter(objects))
         self._display.Context.UpdateCurrentViewer()
         if fit and visible:
             self.fit_all()
@@ -840,6 +856,7 @@ class OccViewerPanel(QWidget):
             self.detach_manipulator()
         objects = self._robot_objects.pop(key, {})
         self._robot_link_transforms.pop(key, None)
+        self._robot_anchor_names.pop(key, None)
         if self.is_ready:
             for presentation in objects.values():
                 self._display.Context.Remove(presentation, False)
@@ -984,7 +1001,10 @@ class OccViewerPanel(QWidget):
         presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key)
         if presentation is None and self._robot_objects.get(key):
             # The root link is the manipulator anchor for the robot's overall pose.
-            presentation = next(iter(self._robot_objects[key].values()))
+            anchor_name = self._robot_anchor_names.get(key)
+            presentation = self._robot_objects[key].get(anchor_name) if anchor_name else None
+            if presentation is None:
+                presentation = next(iter(self._robot_objects[key].values()))
         if not self.is_ready or presentation is None:
             return False
 
@@ -1025,8 +1045,8 @@ class OccViewerPanel(QWidget):
             self._manipulator_target_key = None
         if self._viewer is not None and self.is_ready:
             from OCC.Core.AIS import AIS_Manipulator
-
-        self._viewer.set_manipulator(AIS_Manipulator())
+            self._viewer.set_manipulator(AIS_Manipulator())
+            self.refresh()
 
     def attach_point_cloud_manipulator(self, node_id: UUID) -> bool:
         return self.attach_model_manipulator(node_id)
@@ -1036,8 +1056,48 @@ class OccViewerPanel(QWidget):
         self._manipulator_coordinate_mode = "local"
         self._update_manipulator_position()
 
+    def _robot_root_transform_from_anchor(self, key: str) -> np.ndarray | None:
+        robot_presentations = self._robot_objects.get(key)
+        if not robot_presentations:
+            return None
+        anchor_name = self._robot_anchor_names.get(key, next(iter(robot_presentations)))
+        anchor = robot_presentations.get(anchor_name)
+        if anchor is None:
+            return None
+        anchor_local = gp_trsf_to_matrix(anchor.LocalTransformation())
+        link_local = np.asarray(
+            self._robot_link_transforms.get(key, {}).get(anchor_name, np.eye(4)),
+            dtype=float,
+        )
+        try:
+            return anchor_local @ np.linalg.inv(link_local)
+        except np.linalg.LinAlgError:
+            return None
+
+    def _on_manipulator_moved(self) -> None:
+        key = self._active_manipulator_key
+        if key is None:
+            return
+        root_matrix = self._robot_root_transform_from_anchor(key)
+        if root_matrix is not None:
+            self.set_model_transform(UUID(key), root_matrix.tolist())
+            self.manipulator_transform_changed.emit(key, root_matrix.tolist())
+            return
+        point_cloud = self._point_cloud_objects.get(key)
+        presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key)
+        if presentation is not None:
+            matrix = gp_trsf_to_matrix(presentation.LocalTransformation())
+            self.manipulator_transform_changed.emit(key, matrix.tolist())
+
     def _on_manipulator_released(self) -> None:
         key = self._active_manipulator_key
+        if key is not None and self._robot_objects.get(key):
+            root_matrix = self._robot_root_transform_from_anchor(key)
+            if root_matrix is None:
+                return
+            self.set_model_transform(UUID(key), root_matrix.tolist())
+            self.manipulator_transform_changed.emit(key, root_matrix.tolist())
+            return
         point_cloud = self._point_cloud_objects.get(key or "")
         presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key or "")
         if key is None or presentation is None:
@@ -1050,19 +1110,35 @@ class OccViewerPanel(QWidget):
         key = self._active_manipulator_key
         if self._manipulator is None or key is None:
             return
-        point_cloud = self._point_cloud_objects.get(key)
-        presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key)
-        bounds = self._point_cloud_bounds.get(key) or self._cad_model_bounds.get(key)
-        if presentation is None or bounds is None:
-            return
+        robot_presentations = self._robot_objects.get(key)
+        if robot_presentations:
+            anchor_name = self._robot_anchor_names.get(key, next(iter(robot_presentations)))
+            anchor = robot_presentations[anchor_name]
+            anchor_local = gp_trsf_to_matrix(anchor.LocalTransformation())
+            link_local = np.asarray(
+                self._robot_link_transforms.get(key, {}).get(anchor_name, np.eye(4)),
+                dtype=float,
+            )
+            try:
+                matrix = anchor_local @ np.linalg.inv(link_local)
+            except np.linalg.LinAlgError:
+                return
+            world_center = matrix @ np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+            rotation = matrix[:3, :3] if self._manipulator_coordinate_mode == "local" else np.eye(3)
+        else:
+            point_cloud = self._point_cloud_objects.get(key)
+            presentation = point_cloud[0] if point_cloud is not None else self._cad_objects.get(key)
+            bounds = self._point_cloud_bounds.get(key) or self._cad_model_bounds.get(key)
+            if presentation is None or bounds is None:
+                return
+            matrix = gp_trsf_to_matrix(presentation.LocalTransformation())
+            bounds_min, bounds_max = bounds
+            local_center = (np.asarray(bounds_min) + np.asarray(bounds_max)) * 0.5
+            world_center = matrix @ np.array([*local_center, 1.0], dtype=float)
+            rotation = matrix[:3, :3] if self._manipulator_coordinate_mode == "local" else np.eye(3)
 
         from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pnt
 
-        matrix = gp_trsf_to_matrix(presentation.LocalTransformation())
-        bounds_min, bounds_max = bounds
-        local_center = (np.asarray(bounds_min) + np.asarray(bounds_max)) * 0.5
-        world_center = matrix @ np.array([*local_center, 1.0], dtype=float)
-        rotation = matrix[:3, :3] if self._manipulator_coordinate_mode == "local" else np.eye(3)
         x_direction = rotation[:, 0]
         z_direction = rotation[:, 2]
         position = gp_Ax2(
@@ -1071,4 +1147,4 @@ class OccViewerPanel(QWidget):
             gp_Dir(*(float(value) for value in x_direction)),
         )
         self._manipulator.SetPosition(position)
-        self._display.Context.Redisplay(self._manipulator, False)
+        self._display.GetView().Redraw()
